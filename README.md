@@ -6,7 +6,7 @@ This fork is in active redesign. The goal is a smaller, model-first interface fo
 
 ## Design
 
-The v2 model-facing contract — compact JSON snapshot, annotated screenshots, and an aim → verify → commit loop for pixel clicks — lives in [`docs/redesign.md`](./docs/redesign.md), together with the DeepSeek V4.1 Flash vision baseline. The working prototype that renders an annotated overview and aim preview from a live window is [`scripts/spike/visual-loop.ts`](./scripts/spike/visual-loop.ts).
+The v2 model-facing contract — compact JSON snapshot, annotated screenshots, and an aim → verify → commit loop for pixel clicks — lives in [`docs/redesign.md`](./docs/redesign.md), together with the DeepSeek V4.1 Flash vision baseline. The snapshot builder and overlays are in [`src/visual`](./src/visual); [`scripts/spike/visual-loop.ts`](./scripts/spike/visual-loop.ts) runs them against a live window.
 
 ## Differences from upstream
 

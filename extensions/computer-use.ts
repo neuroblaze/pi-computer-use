@@ -13,6 +13,7 @@ import {
 	executeReadText,
 	executeSearchUi,
 	executeWaitFor,
+	executeZoom,
 	reconstructStateFromBranch,
 	shutdownComputerUseSession,
 } from "../src/bridge.ts";
@@ -22,11 +23,15 @@ const stateId = Type.String({ description: "Required state id owning every @e re
 const point = { x: Type.Number(), y: Type.Number() };
 const mouseButton = Type.Optional(Type.Union([Type.Literal("left"), Type.Literal("right"), Type.Literal("middle")]));
 const clickByRef = Type.Object({ action: Type.Literal("click"), ref: Type.String(), button: mouseButton, clickCount: Type.Optional(Type.Number({ minimum: 1, maximum: 3 })) });
-const clickByPoint = Type.Object({ action: Type.Literal("click"), ...point, button: mouseButton, clickCount: Type.Optional(Type.Number({ minimum: 1, maximum: 3 })) });
+const clickByPoint = Type.Object({ action: Type.Literal("click"), ...point, button: mouseButton, clickCount: Type.Optional(Type.Number({ minimum: 1, maximum: 3 })), confirm: Type.Optional(Type.Boolean({ description: "Skip the aim preview and dispatch this coordinate click immediately" })) });
+const aimByPoint = Type.Object({ action: Type.Literal("aim"), ...point });
+const commitAim = Type.Object({ action: Type.Literal("commit") });
 const uiAction = Type.Union([
 	Type.Object({ action: Type.Literal("press"), ref: Type.String({ description: "Actionable outline ref" }) }),
 	clickByRef,
 	clickByPoint,
+	aimByPoint,
+	commitAim,
 	Type.Object({ action: Type.Literal("setText"), ref: Type.String({ description: "Editable outline ref" }), text: Type.String() }),
 	Type.Object({ action: Type.Literal("typeText"), ref: Type.Optional(Type.String({ description: "Omit after a click to type into the focus established by that click" })), text: Type.String() }),
 	Type.Object({ action: Type.Literal("keypress"), ref: Type.Optional(Type.String({ description: "Omit to send keys to the focused control" })), keys: Type.Array(Type.String(), { minItems: 1 }) }),
@@ -63,10 +68,11 @@ const findTool = defineTool({
 const observeTool = defineTool({
 	name: "observe_ui",
 	label: "Observe UI",
-	description: "Capture the current/frontmost root or one exact @r root and return a compact list of actionable @e controls plus stateId.",
-	promptSnippet: "Primary UI observation tool. Follow with search_ui, expand_ui, inspect_ui, or act_ui.",
+	description: "Capture the current/frontmost root or one exact @r root and return a JSON observation (elements with refs, clusters, visible text) plus stateId.",
+	promptSnippet: "Primary UI observation tool. Follow with zoom_ui, search_ui, expand_ui, inspect_ui, or act_ui.",
 	promptGuidelines: [
 		"Use mode=semantic to skip OCR and images, visual to force them, and fused for automatic selection.",
+		"Elements carry state-scoped refs; clusters C1… group controls whose badges would overlap, and their member refs stay clickable.",
 		"Use @e outline refs from observe_ui/search_ui for act_ui; pictureOnly refs are coordinate-only and blocked by UI-tree-only policy.",
 		"Use search_ui for unlisted controls; expand_ui on the root ref or detail=outline for structure.",
 	],
@@ -115,7 +121,10 @@ const actTool = defineTool({
 	label: "Act",
 	description: "Perform one or more precisely targeted checked actions and return the successor state.",
 	promptSnippet: "Pass dependent click/type steps together and use expect for observable completion.",
-	promptGuidelines: ["After clicking an editable region, omit ref from typeText/keypress so input follows the established focus."],
+	promptGuidelines: [
+		"After clicking an editable region, omit ref from typeText/keypress so input follows the established focus.",
+		"Coordinate clicks preview by default: act_ui returns a crosshair image and arms the point; confirm with { action: \"commit\" } or pass confirm: true to dispatch without a preview.",
+	],
 	parameters: Type.Object({ stateId, expect: Type.Optional(Type.Object(conditionProperties)), actions: Type.Array(uiAction, { minItems: 1, maxItems: 20 }) }),
 	execute: executeAct,
 });
@@ -136,6 +145,23 @@ const waitForTool = defineTool({
 	promptSnippet: "Use after asynchronous UI changes instead of polling observe_ui.",
 	parameters: Type.Object({ ...conditionProperties, stateId }),
 	execute: executeWaitFor,
+});
+
+const zoomTool = defineTool({
+	name: "zoom_ui",
+	label: "Zoom UI",
+	description: "Native-resolution crop of an element ref or region, with screen-coordinate graticule labels.",
+	promptSnippet: "Use zoom_ui to read small text or check pixels; it costs far fewer tokens than a full-size screenshot.",
+	parameters: Type.Object({
+		stateId,
+		ref: Type.Optional(Type.String({ description: "Element ref to zoom; takes precedence over x/y" })),
+		x: Type.Optional(Type.Number({ description: "Capture-relative x center of the region" })),
+		y: Type.Optional(Type.Number({ description: "Capture-relative y center of the region" })),
+		w: Type.Optional(Type.Number({ minimum: 16, description: "Region width, default 320" })),
+		h: Type.Optional(Type.Number({ minimum: 16, description: "Region height, default 240" })),
+		zoom: Type.Optional(Type.Number({ minimum: 0.5, maximum: 6, description: "Upscale factor; auto-fits when omitted" })),
+	}),
+	execute: executeZoom,
 });
 
 const launchBrowserTool = defineTool({
@@ -166,7 +192,7 @@ const evaluateBrowserTool = defineTool({
 	execute: executeEvaluateBrowser,
 });
 
-const COMPUTER_USE_TOOLS = [findTool, observeTool, searchUiTool, expandUiTool, inspectUiTool, actTool, readTextTool, waitForTool, launchBrowserTool, navigateBrowserTool, evaluateBrowserTool];
+const COMPUTER_USE_TOOLS = [findTool, observeTool, searchUiTool, expandUiTool, inspectUiTool, actTool, zoomTool, readTextTool, waitForTool, launchBrowserTool, navigateBrowserTool, evaluateBrowserTool];
 
 function formatConfigStatus(): string {
 	const loaded = getLoadedComputerUseConfig();
@@ -175,6 +201,7 @@ function formatConfigStatus(): string {
 		`browser_use: ${loaded.config.browser_use ? "enabled" : "disabled"}`,
 		`managed_browser: ${loaded.config.managed_browser}`,
 		`headless: ${loaded.config.headless ? "enabled" : "disabled"}`,
+		`aim_preview: ${loaded.config.aim_preview ? "enabled" : "disabled"}`,
 		"",
 		"Sources:",
 		...loaded.sources.map((source) => `- ${source.path}: ${source.error ? `error: ${source.error}` : source.exists ? "loaded" : "not found"}`),

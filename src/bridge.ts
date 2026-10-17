@@ -12,8 +12,11 @@ import { getComputerUseConfig, isBrowserUseEnabled, isHeadlessMode, loadComputer
 import { normalizeFindParams } from "./find-params.ts";
 import { noteAfterAct, noteFromLook, noteRegionKeyForRef, renderNote, type WindowNote } from "./note.ts";
 import { controlLine, foldToBudget, graftScopedOutline, nodeByRef, outlineNodeLabel, outlineNodePath, rankedTextMatch, renderInteractiveControls, restoreOutline, searchOutline, searchOutlineRanked, serializeOutline, serializeOutlineNodeShallow, serializeOutlineSearchMatch, type LookResponse, type Outline, type OutlineChange, type OutlineDiff, type OutlineNode, type OutlineSearchMatch, type SerializedOutline, type SerializedOutlineNode, type SerializedOutlineSearchMatch } from "./outline.ts";
+import { formatObservation } from "./visual/format.ts";
+import { renderAimPreview, renderCrop, renderOverview, screenRectToCapture } from "./visual/overlays.ts";
+import { buildVisualSnapshot, describeClusters, elementAt, type VisualSnapshot } from "./visual/snapshot.ts";
 import { applyOutputEnvelope, boundToolError, clearStoredOutputs, readStoredOutput, UI_TEXT_PAGE_CHARS } from "./output.ts";
-import { AGENT_TOOL_NAMES, type ActParams, type EvaluateBrowserParams, type ExpandUiParams, type ImageMode, type InspectUiParams, type LaunchBrowserParams, type FindParams, type NavigateBrowserParams, type ObserveDetail, type ObserveParams, type ObserveTargetParams, type ReadTextParams, type RootSelector, type SearchUiParams, type UiAction, type WaitForParams } from "./contract.ts";
+import { AGENT_TOOL_NAMES, type ActParams, type EvaluateBrowserParams, type ExpandUiParams, type ImageMode, type InspectUiParams, type LaunchBrowserParams, type FindParams, type NavigateBrowserParams, type ObserveDetail, type ObserveParams, type ObserveTargetParams, type ReadTextParams, type RootSelector, type SearchUiParams, type UiAction, type WaitForParams, type ZoomParams } from "./contract.ts";
 import { toFiniteNumber } from "./platform/coerce.ts";
 import { currentPlatformBackend } from "./platform/index.ts";
 import type { FramePoints, HelperActPerformed, HelperActResult, NativeInputDelivery, PlatformActRequest, PlatformApp as HelperApp, PlatformDiagnostics, PlatformFrontmostResult as FrontmostResult, PlatformRoot as HelperWindow } from "./platform/types.ts";
@@ -22,7 +25,7 @@ import { ResourceScheduler } from "./runtime.ts";
 import { scoreWindow, shouldPreferForegroundModalWindow } from "./root-selection.ts";
 import { SavedStates, type CurrentCapture, type CurrentTarget, type OperationState } from "./state.ts";
 import { changesBetween, renderChanges, stabilizeRefs } from "./view.ts";
-export type { ActParams, EvaluateBrowserParams, ExpandUiParams, ImageMode, InspectUiParams, LaunchBrowserParams, FindParams, MouseButtonName, NavigateBrowserParams, ObserveParams, ObserveTargetParams, ReadTextParams, RootSelector, SearchUiParams, StateTargetParams, UiAction, WaitForParams } from "./contract.ts";
+export type { ActParams, EvaluateBrowserParams, ExpandUiParams, ImageMode, InspectUiParams, LaunchBrowserParams, FindParams, MouseButtonName, NavigateBrowserParams, ObserveParams, ObserveTargetParams, ReadTextParams, RootSelector, SearchUiParams, StateTargetParams, UiAction, WaitForParams, ZoomParams } from "./contract.ts";
 
 interface ActivationFlags {
 	activated: boolean;
@@ -312,6 +315,25 @@ const runtimeState: RuntimeState = {
 };
 
 const savedStates = new SavedStates();
+
+/**
+ * Whether the active model can receive images, learned from the first tool
+ * call's context. Undefined means unknown; unknown models are treated as
+ * capable so behavior matches upstream.
+ */
+let modelSupportsImages: boolean | undefined;
+
+function imagesAllowed(): boolean {
+	return modelSupportsImages !== false;
+}
+
+function captureMaxEdge(look: LookResponse): number {
+	return Math.max(1, look.image?.width ?? 1, look.image?.height ?? 1);
+}
+
+function observationSnapshot(look: LookResponse, app: string): VisualSnapshot {
+	return buildVisualSnapshot(look, { app, maxEdge: captureMaxEdge(look) });
+}
 export const testing = { runInOperation: <T>(fn: () => T, state: OperationState = {}): T => savedStates.operations.run(state, fn), buildToolResult, browserObservationResult, waitForViewText, performSearchUi };
 let resourceScheduler = new ResourceScheduler();
 
@@ -1050,7 +1072,9 @@ async function buildToolResult(
 	const transition = base ? changesBetween(base.outline, result.outline) : undefined;
 	const useDiff = Boolean(transition && !transition.useFullView);
 	const folded = foldToBudget(result.outline);
-	const view = useDiff ? undefined : renderStateView(result.outline, result.capture.stateId, detail, transition?.reason);
+	const useV2 = tool === "observe_ui" && !useDiff && detail === "compact";
+	const snapshot = useV2 || fallbackReason ? observationSnapshot(result.look, result.target.appName) : undefined;
+	const view = useDiff || useV2 ? undefined : renderStateView(result.outline, result.capture.stateId, detail, transition?.reason);
 	const renderedNote = renderNote(state.currentNote);
 
 	const details: ComputerUseDetails = {
@@ -1078,7 +1102,7 @@ async function buildToolResult(
 		changes: useDiff ? transition?.changes : undefined,
 		viewReason: transition?.useFullView ? transition.reason : undefined,
 		renderedOutline: folded.text,
-		detail: view?.detail,
+		detail: useV2 ? "compact" : view?.detail,
 		outline: serializeOutline(result.outline),
 		note: state.currentNote,
 		activation: result.activation,
@@ -1105,17 +1129,35 @@ async function buildToolResult(
 	// The model must echo capture.stateId into follow-up tools. Exposing only the
 	// helper-internal lookId here makes a plausible but invalid stateId easy to use.
 	const renderedChanges = useDiff ? renderChanges(transition!.changes) : "";
-	const outlineText = view
-		? `\n\n${view.text}`
-		: `\n\nChanges (${transition!.changedNodeCount}, ${base!.stateId} → ${result.capture.stateId}):\n${renderedChanges || "(no element changes)"}\nUse stateId ${result.capture.stateId} for subsequent actions and queries.`;
+	const v2Text = useV2 && snapshot
+		? `\n\n${formatObservation(snapshot, { stateId: result.capture.stateId })}${snapshot.clusters.length > 0 ? "\n(Clusters C1… group controls whose badges would overlap; member refs are listed under \"clusters\".)" : ""}`
+		: "";
+	const outlineText = useV2
+		? v2Text
+		: view
+			? `\n\n${view.text}`
+			: `\n\nChanges (${transition!.changedNodeCount}, ${base!.stateId} → ${result.capture.stateId}):\n${renderedChanges || "(no element changes)"}\nUse stateId ${result.capture.stateId} for subsequent actions and queries.`;
 	const fallbackText = fallbackReason ? `\n\n${fallbackReason.message}` : "";
+	const advisoryText = tool === "observe_ui" && !imagesAllowed()
+		? "\n\nThis model cannot receive images: a vision-capable model is strongly recommended for computer use. If this task needs visual feedback, ask your user to switch models."
+		: "";
 	const deltaText = rootDeltaLines(execution).join("\n");
-	const content: AgentToolResult<ComputerUseDetails>["content"] = [{ type: "text", text: `${summary}${deltaText ? `\n${deltaText}` : ""}${consoleText}${noteText}${outlineText}${fallbackText}` }];
-	if (fallbackReason && result.look.image?.jpegBase64) {
-		content.push({ type: "image", data: result.look.image.jpegBase64, mimeType: result.look.image.mimeType ?? "image/jpeg" });
+	const content: AgentToolResult<ComputerUseDetails>["content"] = [{ type: "text", text: `${summary}${deltaText ? `\n${deltaText}` : ""}${consoleText}${noteText}${outlineText}${fallbackText}${advisoryText}` }];
+	if (fallbackReason && result.look.image?.jpegBase64 && imagesAllowed()) {
+		const annotated = snapshot ? await tryRenderOverview(result.look, snapshot) : undefined;
+		if (annotated) content.push({ type: "image", data: annotated.toString("base64"), mimeType: "image/png" });
+		else content.push({ type: "image", data: result.look.image.jpegBase64, mimeType: result.look.image.mimeType ?? "image/jpeg" });
 	}
 
 	return { content, details };
+}
+
+async function tryRenderOverview(look: LookResponse, snapshot: VisualSnapshot): Promise<Buffer | undefined> {
+	try {
+		return await renderOverview(look, snapshot, { maxEdge: captureMaxEdge(look) });
+	} catch {
+		return undefined;
+	}
 }
 
 type NativePreparedAction = Exclude<PreparedAction, { action: "wait" }>;
@@ -1666,6 +1708,71 @@ async function performObserve(params: ObserveParams, signal?: AbortSignal): Prom
 	return await buildToolResult("observe_ui", summary, captureResult, executionTrace("look", "stealth"), signal, imageMode, undefined, params.detail);
 }
 
+/** Native-resolution crop of a ref or region, with a screen-coordinate graticule. */
+async function performZoom(params: ZoomParams, _signal?: AbortSignal): Promise<AgentToolResult<ComputerUseDetails>> {
+	const state = operationState();
+	const capture = validateStateId(params.stateId);
+	const look = currentLookOrThrow();
+	if (!look.image?.jpegBase64) throw new Error("zoom_ui needs an image-bearing observation. Observe with mode \"visual\", or a root that returns an image.");
+	const target = state.currentTarget!;
+	const ref = trimOrUndefined(params.ref);
+	let rect: { x: number; y: number; w: number; h: number };
+	let label: string;
+	if (ref) {
+		const node = nodeByRef(state.currentOutline!, ref);
+		if (!node?.rect) throw new Error(`Ref '${ref}' has no geometry in the current outline.`);
+		rect = screenRectToCapture(look, node.rect);
+		label = ref;
+	} else {
+		if (!Number.isFinite(params.x) || !Number.isFinite(params.y)) throw new Error("zoom_ui requires a ref or x/y coordinates.");
+		const width = Number.isFinite(params.w) ? Math.max(16, params.w!) : 320;
+		const height = Number.isFinite(params.h) ? Math.max(16, params.h!) : 240;
+		rect = { x: Math.round(params.x! - width / 2), y: Math.round(params.y! - height / 2), w: Math.round(width), h: Math.round(height) };
+		label = `${Math.round(params.x!)},${Math.round(params.y!)}`;
+	}
+	const zoom = Number.isFinite(params.zoom) ? Math.min(6, Math.max(0.5, params.zoom!)) : undefined;
+	const snapshot = observationSnapshot(look, target.appName);
+	const crop = await renderCrop(look, rect, { zoom, maxOutput: 1200, caption: `zoom ${label} — ${target.appName}` });
+	const inView = snapshot.elements.filter((element) =>
+		element.rect[0] < rect.x + rect.w && element.rect[0] + element.rect[2] > rect.x &&
+		element.rect[1] < rect.y + rect.h && element.rect[1] + element.rect[3] > rect.y);
+	const listing = inView.length > 0
+		? inView.map((element) => `${element.ref} ${element.role}${element.name ? ` "${element.name}"` : ""}`).join(" | ")
+		: "none";
+	const content: AgentToolResult<ComputerUseDetails>["content"] = [
+		{ type: "text", text: `Zoomed ${label} (${rect.w}x${rect.h}) in ${target.appName} — ${target.windowTitle}. Elements in view: ${listing}.` },
+	];
+	if (imagesAllowed()) content.push({ type: "image", data: crop.toString("base64"), mimeType: "image/png" });
+	const details: ComputerUseDetails = {
+		tool: "zoom_ui",
+		target: {
+			app: target.appName,
+			bundleId: target.bundleId,
+			pid: target.pid,
+			windowTitle: target.windowTitle,
+			windowId: target.windowId,
+			windowRef: target.windowRef,
+			nativeWindowRef: target.nativeWindowRef,
+		},
+		capture: {
+			stateId: capture.stateId,
+			width: capture.width,
+			height: capture.height,
+			scaleFactor: capture.scaleFactor,
+			timestamp: capture.timestamp,
+			coordinateSpace: "window-relative-screenshot-pixels",
+		},
+		lookId: look.lookId,
+		view: "full",
+		activation: emptyActivation(),
+		execution: executionTrace("look", "stealth"),
+		status: "ok",
+		config: getComputerUseConfig(),
+		helper: runtimeState.helperDiagnostics,
+	};
+	return { content, details };
+}
+
 function currentOutlineOrThrow(stateId?: string): Outline {
 	validateStateId(stateId);
 	const outline = operationState().currentOutline;
@@ -2087,17 +2194,124 @@ function validateActionTarget(action: UiAction): void {
 		throw new Error(`${action.action} requires exactly one target: ref or x/y coordinates.`);
 	}
 	if (action.action === "press" && !hasRef) throw new Error("press requires an actionable ref.");
+	if (action.action === "aim" && !hasPoint) throw new Error("aim requires x/y coordinates.");
+	if (action.action === "commit" && (hasRef || hasPoint)) throw new Error("commit takes no ref or coordinates; it clicks the armed aim point.");
 	if (action.action === "scroll" && toFiniteNumber(action.scrollX, 0) === 0 && toFiniteNumber(action.scrollY, 0) === 0) throw new Error("scroll requires a non-zero scrollX or scrollY delta.");
 	if (action.clickCount !== undefined && (!Number.isInteger(action.clickCount) || action.clickCount < 1 || action.clickCount > 3)) throw new Error("clickCount must be an integer from 1 to 3.");
 }
 
-async function performAct(params: ActParams, signal?: AbortSignal): Promise<AgentToolResult<ComputerUseDetails | TerminalDesktopActionDetails | BrowserObservationDetails>> {
+async function performAct(params: ActParams, signal?: AbortSignal, _ctx?: ExtensionContext): Promise<AgentToolResult<ComputerUseDetails | TerminalDesktopActionDetails | BrowserObservationDetails>> {
 	const actions = Array.isArray(params.actions) ? params.actions : [];
 	if (actions.length === 0) throw new Error("act_ui.actions must contain at least one action.");
 	if (actions.length > 20) throw new Error("act_ui supports at most 20 actions per transaction.");
 	for (const action of actions) validateActionTarget(action);
-	if (operationState().contextId) return await performBrowserTransaction(params, actions, signal);
+	if (operationState().contextId) {
+		if (actions.some((action) => action.action === "aim" || action.action === "commit")) {
+			throw new Error("aim/commit previews are desktop-only; browser pages are clicked by ref or coordinate directly.");
+		}
+		return await performBrowserTransaction(params, actions, signal);
+	}
+	const preview = await interceptAimPreview(params, actions, signal);
+	if (preview) return preview;
 	return await performDesktopTransaction(params, actions, signal);
+}
+
+interface ArmedAim {
+	x: number;
+	y: number;
+	lookId: string;
+	stateId: string;
+	button?: UiAction["button"];
+	clickCount?: number;
+}
+
+let armedAim: ArmedAim | undefined;
+
+/**
+ * Coordinate clicks preview by default (config `aim_preview`) when the active
+ * model can see images: aim renders a crosshair overview plus a graticule crop
+ * and arms the point; commit dispatches it once. Nothing is dispatched by aim.
+ */
+async function interceptAimPreview(params: ActParams, actions: UiAction[], signal?: AbortSignal): Promise<AgentToolResult<ComputerUseDetails | TerminalDesktopActionDetails> | undefined> {
+	const aimActions = actions.filter((action) => action.action === "aim");
+	const commitActions = actions.filter((action) => action.action === "commit");
+	if (aimActions.length > 0 || commitActions.length > 0) {
+		if (actions.length !== 1) throw new Error("aim and commit must be the only action in the transaction.");
+		if (commitActions.length === 1) {
+			if (!armedAim) throw new Error("No armed aim point. Send act_ui with { action: \"aim\", x, y } first.");
+			const look = currentLookOrThrow();
+			if (armedAim.lookId !== look.lookId) {
+				armedAim = undefined;
+				throw new Error("The UI changed since the aim preview; aim again before committing.");
+			}
+			const click: UiAction = { action: "click", x: armedAim.x, y: armedAim.y, button: armedAim.button, clickCount: armedAim.clickCount, confirm: true };
+			armedAim = undefined;
+			return await performDesktopTransaction(params, [click], signal);
+		}
+		const aim = aimActions[0];
+		if (!Number.isFinite(aim.x) || !Number.isFinite(aim.y)) throw new Error("aim requires x/y coordinates.");
+		if (!imagesAllowed()) throw new Error("Aim previews need a vision-capable model. Pass confirm: true on a coordinate click to dispatch without a preview.");
+		return await aimPreviewResult(params, { x: aim.x!, y: aim.y! }, signal, aim);
+	}
+	const coordinateClicks = actions.filter((action) => action.action === "click" && !trimOrUndefined(action.ref) && action.confirm !== true);
+	if (coordinateClicks.length === 0 || !getComputerUseConfig().aim_preview) return undefined;
+	if (!imagesAllowed()) return undefined;
+	if (actions.length > 1) {
+		throw new Error("Coordinate clicks preview by default. Preview them one at a time ({ action: \"aim\", x, y } then { action: \"commit\" }), or pass confirm: true to batch them.");
+	}
+	const click = coordinateClicks[0];
+	return await aimPreviewResult(params, { x: click.x!, y: click.y! }, signal, click);
+}
+
+async function aimPreviewResult(params: ActParams, point: { x: number; y: number }, signal?: AbortSignal, source?: UiAction): Promise<AgentToolResult<ComputerUseDetails>> {
+	const state = operationState();
+	const capture = validateStateId(params.stateId);
+	const look = currentLookOrThrow();
+	ensurePointIsInLookImage(point.x, point.y, look, "aim coordinates");
+	const target = state.currentTarget!;
+	const snapshot = observationSnapshot(look, target.appName);
+	const preview = await renderAimPreview(look, snapshot, point, { maxEdge: captureMaxEdge(look) });
+	armedAim = { x: point.x, y: point.y, lookId: look.lookId, stateId: capture.stateId, button: source?.button, clickCount: source?.clickCount };
+	const frame = look.window.framePoints;
+	const scaleX = (look.image?.width ?? frame.w) / Math.max(1, frame.w);
+	const scaleY = (look.image?.height ?? frame.h) / Math.max(1, frame.h);
+	const screenX = Math.round(frame.x + point.x / scaleX);
+	const screenY = Math.round(frame.y + point.y / scaleY);
+	const under = elementAt(snapshot, point.x, point.y)[0];
+	const hit = under ? `${under.ref} ${under.role}${under.name ? ` "${under.name}"` : ""}` : "no element";
+	const details: ComputerUseDetails = {
+		tool: "act_ui",
+		target: {
+			app: target.appName,
+			bundleId: target.bundleId,
+			pid: target.pid,
+			windowTitle: target.windowTitle,
+			windowId: target.windowId,
+			windowRef: target.windowRef,
+			nativeWindowRef: target.nativeWindowRef,
+		},
+		capture: {
+			stateId: capture.stateId,
+			width: capture.width,
+			height: capture.height,
+			scaleFactor: capture.scaleFactor,
+			timestamp: capture.timestamp,
+			coordinateSpace: "window-relative-screenshot-pixels",
+		},
+		lookId: look.lookId,
+		view: "full",
+		activation: emptyActivation(),
+		execution: executionTrace("act", "stealth", { outcome: "unknown" }),
+		status: "ok",
+		config: getComputerUseConfig(),
+		helper: runtimeState.helperDiagnostics,
+	};
+	const content: AgentToolResult<ComputerUseDetails>["content"] = [
+		{ type: "text", text: `Aim preview at screen (${screenX},${screenY}) in ${target.appName} — ${target.windowTitle}. Under the point: ${hit}. Nothing was dispatched. Send act_ui { action: "commit" } to click this point once, or aim at another point.` },
+		{ type: "image", data: preview.overview.toString("base64"), mimeType: "image/png" },
+		{ type: "image", data: preview.crop.toString("base64"), mimeType: "image/png" },
+	];
+	return { content, details };
 }
 
 function managedBrowserExecutableCandidates(browser: "helium" | "chrome"): string[] {
@@ -2274,7 +2488,7 @@ async function executeTool<P, T>(ctx: ExtensionContext, params: P, signal: Abort
 	});
 }
 
-function makeToolExecutor<P, D>(tool: string, perform: (params: P, signal?: AbortSignal) => Promise<AgentToolResult<D>>) {
+function makeToolExecutor<P, D>(tool: string, perform: (params: P, signal?: AbortSignal, ctx?: ExtensionContext) => Promise<AgentToolResult<D>>) {
 	return async (
 		_toolCallId: string,
 		params: P,
@@ -2283,7 +2497,8 @@ function makeToolExecutor<P, D>(tool: string, perform: (params: P, signal?: Abor
 		ctx: ExtensionContext,
 	): Promise<AgentToolResult<D>> => {
 		try {
-			return applyOutputEnvelope(tool, await executeTool(ctx, params, signal, () => perform(params, signal)));
+			if (ctx.model) modelSupportsImages = ctx.model.input?.includes("image") ?? true;
+			return applyOutputEnvelope(tool, await executeTool(ctx, params, signal, () => perform(params, signal, ctx)));
 		} catch (error) {
 			throw boundToolError(tool, error);
 		}
@@ -2294,6 +2509,7 @@ export const executeFind = makeToolExecutor("find_roots", performListWindows);
 export const executeReadText = makeToolExecutor("read_text", performReadText);
 export const executeWaitFor = makeToolExecutor("wait_for", performWaitFor);
 export const executeObserve = makeToolExecutor("observe_ui", performObserve);
+export const executeZoom = makeToolExecutor<ZoomParams, ComputerUseDetails>("zoom_ui", performZoom);
 export const executeSearchUi = makeToolExecutor("search_ui", performSearchUi);
 export const executeExpandUi = makeToolExecutor("expand_ui", performExpandUi);
 export const executeInspectUi = makeToolExecutor("inspect_ui", performInspectUi);

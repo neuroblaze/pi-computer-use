@@ -173,7 +173,7 @@ async function runInsideSession() {
 		assert(rowRect?.w > 0 && rowRect?.h > 0, "Xfce Terminal row had no grounded click rectangle");
 		const foregroundSelected = await tool(executeAct, {
 			stateId,
-			actions: [{ action: "click", x: rowRect.x + rowRect.w / 2, y: rowRect.y + rowRect.h / 2 }],
+			actions: [{ action: "click", x: rowRect.x + rowRect.w / 2, y: rowRect.y + rowRect.h / 2, confirm: true }],
 		});
 		debug("foreground row selection", foregroundSelected.details?.execution);
 		assertForegroundX11(foregroundSelected.details?.execution);

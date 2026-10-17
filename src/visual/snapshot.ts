@@ -15,7 +15,7 @@ const BADGE_OFFSET_X = 11;
 const BADGE_OFFSET_Y = 13;
 
 export interface VisualElement {
-	id: number;
+	ref: string;
 	role: string;
 	name: string;
 	value?: string;
@@ -27,7 +27,7 @@ export interface VisualElement {
 export interface VisualCluster {
 	id: string;
 	at: [number, number];
-	elements: number[];
+	refs: string[];
 }
 
 export interface VisualSnapshot {
@@ -46,12 +46,18 @@ export interface VisualSnapshot {
 
 export interface SnapshotOptions {
 	app?: string;
-	/** Render edge used for cluster distances; must match the renderer. */
+	/** Render edge used for cluster distances; the renderer uses the same value. */
 	maxEdge?: number;
 	/** Distance between badge anchors, at render scale, below which elements cluster. */
 	clusterDistance?: number;
 	maxTextBlocks?: number;
 	maxTextChars?: number;
+}
+
+/** Badge label for an element: `@e12` renders as `12` so the image and act_ui refs agree. */
+export function badgeLabel(ref: string): string {
+	const match = /^@?e(\d+)$/.exec(ref);
+	return match ? match[1] : ref.slice(0, 3);
 }
 
 function sanitizeName(node: OutlineNode): string {
@@ -64,6 +70,10 @@ function sanitizeName(node: OutlineNode): string {
 
 function cleanValue(value: string): string {
 	return value.replace(/\uFFFC/g, "").trim();
+}
+
+function normalizeRole(role: string): string {
+	return role.replace(/^AX/, "").toLowerCase();
 }
 
 export function buildVisualSnapshot(look: LookResponse, options: SnapshotOptions = {}): VisualSnapshot {
@@ -87,22 +97,30 @@ export function buildVisualSnapshot(look: LookResponse, options: SnapshotOptions
 
 	const nodes = look.parsedOutline?.nodes ?? [];
 	const interactive = nodes.filter((node) => {
-		if (!node.rect || node.offscreen || !visibleRect(node)) return false;
-		const role = node.role.toLowerCase();
+		if (!node.ref || !node.rect || node.offscreen || !visibleRect(node)) return false;
+		const role = normalizeRole(node.role);
 		if (!(INTERACTIVE_ROLES.has(role) || node.isTextInput || node.canSetValue)) return false;
 		if (node.rect.w * node.rect.h > 0.6 * frameArea) return false;
 		return Boolean(sanitizeName(node) || cleanValue(node.value) || node.isTextInput);
 	});
 
-	const elements: VisualElement[] = interactive.map((node, index) => ({
-		id: index + 1,
-		role: node.role.toLowerCase(),
-		name: sanitizeName(node),
-		value: cleanValue(node.value) || undefined,
-		rect: visibleRect(node)!,
-		actions: node.actions,
-		focused: node.focused || undefined,
-	}));
+	const seen = new Set<string>();
+	const elements: VisualElement[] = [];
+	for (const node of interactive) {
+		const rect = visibleRect(node)!;
+		const duplicateKey = `${node.role}|${sanitizeName(node)}|${rect.join(",")}`;
+		if (seen.has(duplicateKey)) continue;
+		seen.add(duplicateKey);
+		elements.push({
+			ref: node.ref,
+			role: normalizeRole(node.role),
+			name: sanitizeName(node),
+			value: cleanValue(node.value) || undefined,
+			rect,
+			actions: node.actions,
+			focused: node.focused || undefined,
+		});
+	}
 
 	const badgeAnchor = (element: VisualElement): [number, number] => {
 		const x = element.rect[0] * renderScale + BADGE_OFFSET_X;
@@ -111,42 +129,42 @@ export function buildVisualSnapshot(look: LookResponse, options: SnapshotOptions
 			: element.rect[1] * renderScale + BADGE_OFFSET_Y;
 		return [x, y];
 	};
-	const anchors = new Map<number, [number, number]>(elements.map((element) => [element.id, badgeAnchor(element)]));
+	const anchors = new Map<string, [number, number]>(elements.map((element) => [element.ref, badgeAnchor(element)]));
 	const distance = options.clusterDistance ?? DEFAULT_CLUSTER_DISTANCE;
-	const parent = new Map<number, number>(elements.map((element) => [element.id, element.id]));
-	const find = (id: number): number => {
-		let root = id;
+	const parent = new Map<string, string>(elements.map((element) => [element.ref, element.ref]));
+	const find = (ref: string): string => {
+		let root = ref;
 		while (parent.get(root)! !== root) root = parent.get(root)!;
 		return root;
 	};
 	for (let i = 0; i < elements.length; i += 1) {
 		for (let j = i + 1; j < elements.length; j += 1) {
-			const [ax, ay] = anchors.get(elements[i].id)!;
-			const [bx, by] = anchors.get(elements[j].id)!;
+			const [ax, ay] = anchors.get(elements[i].ref)!;
+			const [bx, by] = anchors.get(elements[j].ref)!;
 			if ((ax - bx) ** 2 + (ay - by) ** 2 <= distance * distance) {
-				const ra = find(elements[i].id);
-				const rb = find(elements[j].id);
+				const ra = find(elements[i].ref);
+				const rb = find(elements[j].ref);
 				if (ra !== rb) parent.set(rb, ra);
 			}
 		}
 	}
-	const groups = new Map<number, number[]>();
+	const groups = new Map<string, string[]>();
 	for (const element of elements) {
-		const root = find(element.id);
+		const root = find(element.ref);
 		const group = groups.get(root);
-		if (group) group.push(element.id);
-		else groups.set(root, [element.id]);
+		if (group) group.push(element.ref);
+		else groups.set(root, [element.ref]);
 	}
 	const clusters: VisualCluster[] = [];
-	for (const ids of groups.values()) {
-		if (ids.length < 2) continue;
-		const xs = ids.map((id) => anchors.get(id)![0]);
-		const ys = ids.map((id) => anchors.get(id)![1]);
+	for (const refs of groups.values()) {
+		if (refs.length < 2) continue;
+		const xs = refs.map((ref) => anchors.get(ref)![0]);
+		const ys = refs.map((ref) => anchors.get(ref)![1]);
 		const at: [number, number] = [
-			Math.round(xs.reduce((a, b) => a + b, 0) / ids.length / renderScale),
-			Math.round(ys.reduce((a, b) => a + b, 0) / ids.length / renderScale),
+			Math.round(xs.reduce((a, b) => a + b, 0) / refs.length / renderScale),
+			Math.round(ys.reduce((a, b) => a + b, 0) / refs.length / renderScale),
 		];
-		clusters.push({ id: `C${clusters.length + 1}`, at, elements: ids });
+		clusters.push({ id: `C${clusters.length + 1}`, at, refs });
 	}
 
 	const title = look.outline.title.trim();
@@ -156,7 +174,7 @@ export function buildVisualSnapshot(look: LookResponse, options: SnapshotOptions
 	const maxBlocks = options.maxTextBlocks ?? DEFAULT_MAX_TEXT_BLOCKS;
 	const maxChars = options.maxTextChars ?? DEFAULT_MAX_TEXT_CHARS;
 	for (const node of nodes) {
-		if (!TEXT_ROLES.has(node.role.toLowerCase()) || !visibleRect(node)) continue;
+		if (!TEXT_ROLES.has(normalizeRole(node.role)) || !visibleRect(node)) continue;
 		const block = cleanValue(node.value) || sanitizeName(node);
 		if (!block || block === title) continue;
 		if (text[text.length - 1] === block) continue;
@@ -196,14 +214,14 @@ export function elementAt(snapshot: VisualSnapshot, x: number, y: number): Visua
 		y >= element.rect[1] && y < element.rect[1] + element.rect[3]);
 }
 
-/** One line per cluster, listing the member elements by id so they stay clickable. */
+/** One line per cluster, listing the member refs so they stay clickable. */
 export function describeClusters(snapshot: VisualSnapshot): string[] {
-	const byId = new Map(snapshot.elements.map((element) => [element.id, element]));
+	const byRef = new Map(snapshot.elements.map((element) => [element.ref, element]));
 	return snapshot.clusters.map((cluster) => {
-		const members = cluster.elements
-			.map((id) => byId.get(id))
+		const members = cluster.refs
+			.map((ref) => byRef.get(ref))
 			.filter((element): element is VisualElement => Boolean(element))
-			.map((element) => `${element.id} ${element.role}${element.name ? ` "${element.name}"` : ""}`);
+			.map((element) => `${element.ref} ${element.role}${element.name ? ` "${element.name}"` : ""}`);
 		return `${cluster.id} at (${cluster.at[0]},${cluster.at[1]}): ${members.join(" | ")}`;
 	});
 }

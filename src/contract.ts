@@ -67,7 +67,7 @@ export interface UiCondition {
 }
 
 export interface UiAction {
-	action: "press" | "click" | "setText" | "typeText" | "keypress" | "scroll" | "drag" | "moveMouse";
+	action: "press" | "click" | "setText" | "typeText" | "keypress" | "scroll" | "drag" | "moveMouse" | "aim" | "commit";
 	ref?: string;
 	x?: number;
 	y?: number;
@@ -78,6 +78,8 @@ export interface UiAction {
 	path?: Array<{ x: number; y: number } | [number, number]>;
 	button?: MouseButtonName;
 	clickCount?: number;
+	/** Skip the aim preview and dispatch this coordinate click immediately. */
+	confirm?: boolean;
 }
 
 export interface ActParams extends StateTargetParams {
@@ -92,6 +94,15 @@ export interface ReadTextParams extends StateTargetParams {
 
 export interface WaitForParams extends StateTargetParams, UiCondition {}
 
+export interface ZoomParams extends StateTargetParams {
+	ref?: string;
+	x?: number;
+	y?: number;
+	w?: number;
+	h?: number;
+	zoom?: number;
+}
+
 export const AGENT_TOOL_NAMES = new Set([
 	"find_roots",
 	"read_text",
@@ -100,6 +111,7 @@ export const AGENT_TOOL_NAMES = new Set([
 	"search_ui",
 	"expand_ui",
 	"inspect_ui",
+	"zoom_ui",
 	"act_ui",
 	"navigate_browser",
 	"evaluate_browser",

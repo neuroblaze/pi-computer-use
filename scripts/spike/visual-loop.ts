@@ -61,5 +61,5 @@ await fs.writeFile(path.join(outDir, "aim.json"), `${JSON.stringify({
 	candidatesUnderPoint: elementAt(snapshot, aim.x, aim.y),
 }, null, 2)}\n`);
 
-console.log(`aim: window(${aim.x},${aim.y}) screen(${aimScreen.x},${aimScreen.y}) -> e${aimed.id} ${aimed.role} "${aimed.name}"`);
+console.log(`aim: window(${aim.x},${aim.y}) screen(${aimScreen.x},${aimScreen.y}) -> ${aimed.ref} ${aimed.role} "${aimed.name}"`);
 console.log(`wrote ${outDir}/{snapshot.json,overview.png,aim-overview.png,aim-crop.png,aim.json}`);

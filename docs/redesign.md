@@ -28,9 +28,9 @@ Rules:
 - **Always report outcomes.** Every act returns a compact change report (`changed`, `focused`, `appeared`, `removed`). `changed: false` is a signal, not a success.
 - **Text-only models still work**, minus the visual modality. The extension reads the active model's input modalities (`ctx.model.input`, `"text" | "image"`), omits images, and adds a one-line advisory that a vision-capable model is strongly recommended for computer use, with the agent offering to switch.
 
-**Wired now (2026-10-17):** observation JSON in `observe_ui` compact views; per-cluster listing; annotated overviews wherever images are attached; `zoom_ui`; coordinate-click aim preview (`aim_preview`, default on) with `commit` and `confirm: true`; the modality advisory.
+**Wired now (2026-10-17):** observation JSON in `observe_ui` compact views (desktop and browser); per-cluster listing; annotated overviews wherever images are attached; `zoom_ui`; coordinate-click aim preview (`aim_preview`, default on) with `commit` and `confirm: true`; the modality advisory; browser pages via CDP: v2 observations, viewport screenshots, rects from `getBoundingClientRect`, zoom and aim previews in viewport pixels.
 
-**Still upstream for now:** refs/state epochs (no auto-refresh on stale state), outline-based `search_ui`/`expand_ui`/`inspect_ui`, browser-page snapshots, and post-click hit reports.
+**Still upstream for now:** refs/state epochs (no auto-refresh on stale state), outline-based `search_ui`/`expand_ui`/`inspect_ui`, and post-click hit reports.
 
 ## Snapshot (JSON)
 
@@ -79,6 +79,15 @@ Rules:
 
 ![aim crop with graticule](images/visual-loop-aim-crop.png)
 
+### Browser pages (CDP)
+
+- Browser observations use the **same pipeline**: `cdpSnapshotForContext` already normalizes the Chrome accessibility tree into the shared outline shape, and now also emits the v2 JSON (`buildBrowserSnapshot`): elements with `@e` refs, viewport rects, clusters, `url`, and paragraph blocks split from `innerText`.
+- Geometry comes from one `getBoundingClientRect` call per actionable target (capped at 120). Viewport CSS pixels are the action space: coordinate actions dispatch in viewport pixels and screenshots are captured clipped at CSS scale, so screenshot pixels and action pixels are identical (no device-pixel-ratio math).
+- Actionability follows the AX tree: Chrome camelCase roles (`textField`, `toggleButton`, …) are mapped, nodes reporting the AX `editable` property count as text inputs, and inputs without an accessible name are still targets when they carry a value — so the observation's elements and the refs that actions accept stay in sync.
+- Screenshot policy follows `mode`: `visual` always captures, `semantic` never, `fused` attaches when the page exposes fewer than three named targets. `zoom_ui` and aim previews capture on demand when the snapshot has no screenshot.
+- Ref clicks stay DOM-level (`resolveNode` + `this.click()` / value set) — they need no geometry at all; the visual layer is for verification and coordinate fallbacks.
+- Armed aim points expire when the snapshot changes, the URL changes, or the page scrolls (`window.scrollX/scrollY` is re-checked at commit).
+
 ### Aim → verify → commit (pixel fallback)
 
 - `act_ui {actions:[{aim:{x,y}}]}` renders a preview: overview with crosshair **plus** a native crop centered on the point, and reports the element under it. Nothing is dispatched; the result arms the point.
@@ -102,16 +111,16 @@ Caveats: single 8-card run; isolated high-contrast targets; measured through thi
 
 ## Implementation
 
-`src/visual` (`snapshot.ts`, `format.ts`, `overlays.ts`) holds the observation model; `jimp` is a runtime dependency (overlays stay in TypeScript). The Pi tools call it directly:
+`src/visual` (`snapshot*.ts` model with a `visual/browser.ts` adapter, `format.ts`, `overlays.ts`) holds the observation model; `jimp` is a runtime dependency (overlays stay in TypeScript). The Pi tools call it directly:
 
-- `observe_ui` compact views return the JSON observation (`formatObservation`); the annotated overview is attached wherever the image policy attaches an image (`mode: "visual"` always, fused on fallback).
-- `act_ui` gains `aim` / `commit`; lone coordinate clicks preview by default (`aim_preview`, default on; `confirm: true` bypasses). Previews are desktop-only and skip text-only models.
-- `zoom_ui` renders a native-resolution crop of a ref or region.
+- `observe_ui` compact views return the JSON observation (`formatObservation`) for desktop looks and browser pages; the annotated overview is attached wherever the image policy attaches an image (`mode: "visual"` always, fused on fallback / sparse pages).
+- `act_ui` gains `aim` / `commit`; lone coordinate clicks preview by default (`aim_preview`, default on; `confirm: true` bypasses). Previews work on both paths and skip text-only models.
+- `zoom_ui` renders a native-resolution crop of a ref or region on both paths.
 - The modality advisory appears when `ctx.model.input` lacks `"image"`.
 
-Checks: `scripts/check-visual.mjs` (unit) and `scripts/check-visual-live.mjs` (`PI_CU_LIVE=1`; Xvfb + zenity) drives observation → zoom → aim → commit end to end. `scripts/spike/visual-loop.ts` remains the standalone renderer demo.
+Checks: `scripts/check-visual.mjs` (unit) and `scripts/check-visual-live.mjs` (`PI_CU_LIVE=1`; Xvfb + Chromium) drives observation → zoom → aim → commit on the desktop path and again over CDP for a browser page. `scripts/spike/visual-loop.ts` remains the standalone renderer demo.
 
-Known gaps: post-click hit reports; browser pages have no aim preview yet; Chromium reports some chrome controls with duplicated or degenerate rects near the window origin (e.g. "Tab search" twice, once at `y = -4`), which surface as corner clusters; and GTK apps under the computer-use image report degenerate `(0, 0)` extents through AT-SPI (zenity), so their observations can list no elements. Both need a helper-side geometry pass.
+Known gaps: post-click hit reports; Chromium reports some chrome controls with duplicated or degenerate rects near the window origin (e.g. "Tab search" twice, once at `y = -4`), which surface as corner clusters; and GTK apps under the computer-use image report degenerate `(0, 0)` extents through AT-SPI (zenity), so their observations can list no elements. Both need a helper-side geometry pass.
 
 ## Decisions (2026-10-16)
 

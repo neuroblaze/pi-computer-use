@@ -11,7 +11,7 @@ Notes for agents working in this repository.
 ## Layout
 
 - `extensions/computer-use.ts` — public Pi tool registration; keep it small.
-- `src/visual/` — v2 observation model: `snapshot.ts` (elements, clusters, text), `format.ts` (observation JSON), `overlays.ts` (annotated overview, zoom crops, aim previews).
+- `src/visual/` — v2 observation model: `snapshot.ts` (source-neutral elements, clusters, text), `format.ts` (observation JSON), `overlays.ts` (annotated overview, zoom crops, aim previews), `browser.ts` (CDP page adapter).
 - `src/bridge.ts`, `src/outline.ts`, `src/state.ts`, `src/runtime.ts` — tool runtime, outline rendering, state ownership, scheduling.
 - `native/linux/bridge-rs` — Rust AT-SPI2/X11 helper (JSON-lines protocol).
 - `scripts/setup-helper.mjs` — installs the helper to `~/.pi/agent/helpers/pi-computer-use/linux-bridge` (env override `PI_COMPUTER_USE_LINUX_HELPER_PATH`).

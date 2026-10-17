@@ -23,13 +23,14 @@ export function formatObservation(snapshot: VisualSnapshot, options: Observation
 
 	const lines: string[] = ["{"];
 	lines.push(` "state": ${JSON.stringify(options.stateId ?? "")},`);
+	if (snapshot.window.url) lines.push(` "url": ${JSON.stringify(snapshot.window.url)},`);
 	lines.push(` "window": { "app": ${JSON.stringify(snapshot.window.app)}, "title": ${JSON.stringify(snapshot.window.title)}, "screen": [${snapshot.window.screen.join(",")}], "size": [${snapshot.window.size.join(",")}] },`);
 	lines.push(" \"elements\": [");
 	visible.forEach((element, index) => {
 		const parts = [`"ref": ${JSON.stringify(element.ref)}`, `"role": ${JSON.stringify(element.role)}`];
 		if (element.name) parts.push(`"name": ${JSON.stringify(compactValue(element.name, maxValueChars))}`);
 		if (element.value) parts.push(`"value": ${JSON.stringify(compactValue(element.value, maxValueChars))}`);
-		parts.push(`"rect": [${element.rect.join(",")}]`);
+		if (element.rect) parts.push(`"rect": [${element.rect.join(",")}]`);
 		if (element.focused) parts.push("\"focused\": true");
 		lines.push(`  { ${parts.join(", ")} }${index === visible.length - 1 ? "" : ","}`);
 	});

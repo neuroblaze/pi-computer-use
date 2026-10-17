@@ -7,14 +7,15 @@ import os from "node:os";
 import path from "node:path";
 import type { AgentToolResult, AgentToolUpdateCallback, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { canRetryInForeground, outcomeAfterCheck, outcomeAfterObservedValues, prepareAction, type ActionState, type PreparedAction } from "./actions.ts";
-import { cdpClickForContext, cdpDragForContext, cdpEvaluateForContext, cdpKeypressForContext, cdpMouseForContext, cdpNavigateContext, cdpScrollForContext, cdpSnapshotForContext, cdpTabForWindow, cdpTypeFocusedForContext, cdpTypeForContext, disconnectCdp, listCdpPageContexts, type CdpConsoleEntry, type CdpPageSnapshot } from "./cdp.ts";
+import { cdpClickForContext, cdpDragForContext, cdpEvaluateForContext, cdpKeypressForContext, cdpMouseForContext, cdpNavigateContext, cdpPageStateForContext, cdpScrollForContext, cdpScreenshotForContext, cdpSnapshotForContext, cdpTabForWindow, cdpTypeFocusedForContext, cdpTypeForContext, disconnectCdp, listCdpPageContexts, type CdpConsoleEntry, type CdpPageSnapshot } from "./cdp.ts";
 import { getComputerUseConfig, isBrowserUseEnabled, isHeadlessMode, loadComputerUseConfig } from "./config.ts";
 import { normalizeFindParams } from "./find-params.ts";
 import { noteAfterAct, noteFromLook, noteRegionKeyForRef, renderNote, type WindowNote } from "./note.ts";
 import { controlLine, foldToBudget, graftScopedOutline, nodeByRef, outlineNodeLabel, outlineNodePath, rankedTextMatch, renderInteractiveControls, restoreOutline, searchOutline, searchOutlineRanked, serializeOutline, serializeOutlineNodeShallow, serializeOutlineSearchMatch, type LookResponse, type Outline, type OutlineChange, type OutlineDiff, type OutlineNode, type OutlineSearchMatch, type SerializedOutline, type SerializedOutlineNode, type SerializedOutlineSearchMatch } from "./outline.ts";
 import { formatObservation } from "./visual/format.ts";
-import { renderAimPreview, renderCrop, renderOverview, screenRectToCapture } from "./visual/overlays.ts";
-import { buildVisualSnapshot, describeClusters, elementAt, type VisualSnapshot } from "./visual/snapshot.ts";
+import { buildBrowserSnapshot, browserCaptureSource } from "./visual/browser.ts";
+import { captureSourceFromLook, rectToCapture, renderAimPreview, renderCrop, renderOverview, type CaptureSource } from "./visual/overlays.ts";
+import { buildVisualSnapshot, elementAt, type VisualElement, type VisualSnapshot } from "./visual/snapshot.ts";
 import { applyOutputEnvelope, boundToolError, clearStoredOutputs, readStoredOutput, UI_TEXT_PAGE_CHARS } from "./output.ts";
 import { AGENT_TOOL_NAMES, type ActParams, type EvaluateBrowserParams, type ExpandUiParams, type ImageMode, type InspectUiParams, type LaunchBrowserParams, type FindParams, type NavigateBrowserParams, type ObserveDetail, type ObserveParams, type ObserveTargetParams, type ReadTextParams, type RootSelector, type SearchUiParams, type UiAction, type WaitForParams, type ZoomParams } from "./contract.ts";
 import { toFiniteNumber } from "./platform/coerce.ts";
@@ -89,7 +90,7 @@ interface ComputerUseDetails {
 		height: number;
 		scaleFactor: number;
 		timestamp: number;
-		coordinateSpace: "window-relative-screenshot-pixels";
+		coordinateSpace: "window-relative-screenshot-pixels" | "viewport-css-pixels";
 	};
 	lookId?: string;
 	view: "full" | "diff";
@@ -327,12 +328,22 @@ function imagesAllowed(): boolean {
 	return modelSupportsImages !== false;
 }
 
-function captureMaxEdge(look: LookResponse): number {
-	return Math.max(1, look.image?.width ?? 1, look.image?.height ?? 1);
+function captureMaxEdge(source: CaptureSource): number {
+	return Math.max(1, source.image.width, source.image.height);
 }
 
 function observationSnapshot(look: LookResponse, app: string): VisualSnapshot {
-	return buildVisualSnapshot(look, { app, maxEdge: captureMaxEdge(look) });
+	const source = captureSourceFromLook(look);
+	return buildVisualSnapshot(look, { app, maxEdge: source ? captureMaxEdge(source) : undefined });
+}
+
+async function tryRenderOverview(source: CaptureSource | undefined, snapshot: VisualSnapshot): Promise<Buffer | undefined> {
+	if (!source) return undefined;
+	try {
+		return await renderOverview(source, snapshot, { maxEdge: captureMaxEdge(source) });
+	} catch {
+		return undefined;
+	}
 }
 export const testing = { runInOperation: <T>(fn: () => T, state: OperationState = {}): T => savedStates.operations.run(state, fn), buildToolResult, browserObservationResult, waitForViewText, performSearchUi };
 let resourceScheduler = new ResourceScheduler();
@@ -1144,20 +1155,12 @@ async function buildToolResult(
 	const deltaText = rootDeltaLines(execution).join("\n");
 	const content: AgentToolResult<ComputerUseDetails>["content"] = [{ type: "text", text: `${summary}${deltaText ? `\n${deltaText}` : ""}${consoleText}${noteText}${outlineText}${fallbackText}${advisoryText}` }];
 	if (fallbackReason && result.look.image?.jpegBase64 && imagesAllowed()) {
-		const annotated = snapshot ? await tryRenderOverview(result.look, snapshot) : undefined;
+		const annotated = snapshot ? await tryRenderOverview(captureSourceFromLook(result.look), snapshot) : undefined;
 		if (annotated) content.push({ type: "image", data: annotated.toString("base64"), mimeType: "image/png" });
 		else content.push({ type: "image", data: result.look.image.jpegBase64, mimeType: result.look.image.mimeType ?? "image/jpeg" });
 	}
 
 	return { content, details };
-}
-
-async function tryRenderOverview(look: LookResponse, snapshot: VisualSnapshot): Promise<Buffer | undefined> {
-	try {
-		return await renderOverview(look, snapshot, { maxEdge: captureMaxEdge(look) });
-	} catch {
-		return undefined;
-	}
 }
 
 type NativePreparedAction = Exclude<PreparedAction, { action: "wait" }>;
@@ -1433,19 +1436,36 @@ async function withBrowserWrite<T>(contextId: string, work: () => Promise<T>): P
 	return result.value;
 }
 
-function browserObservationResult(browser: CdpPageSnapshot, resourceKey: string, epoch: number, tool: string, base?: { stateId: string; outline: SerializedOutline }, detail: ObserveDetail = "compact"): AgentToolResult<BrowserObservationDetails> {
+async function browserObservationResult(browser: CdpPageSnapshot, resourceKey: string, epoch: number, tool: string, base?: { stateId: string; outline: SerializedOutline }, detail: ObserveDetail = "compact"): Promise<AgentToolResult<BrowserObservationDetails>> {
 	savedStates.set({ stateId: browser.snapshotId, resourceKey, epoch, value: { kind: "browser", snapshot: browser, outline: browser.outline } });
 	const currentOutline = restoreOutline(browser.outline);
 	const transition = base ? changesBetween(restoreOutline(base.outline), currentOutline) : undefined;
 	const useDiff = Boolean(transition && !transition.useFullView);
+	const useV2 = !useDiff && detail === "compact";
+	const snapshot = useV2 || browser.image ? buildBrowserSnapshot(browser) : undefined;
 	const folded = foldToBudget(currentOutline);
-	const view = useDiff ? undefined : detail === "outline" ? { detail, text: folded.text } : renderStateView(currentOutline, browser.snapshotId, detail);
+	const view = useV2 || useDiff ? undefined : detail === "outline" ? { detail, text: folded.text } : renderStateView(currentOutline, browser.snapshotId, detail);
 	const root = { ref: storeBrowserRootRef(browser.contextId), kind: "browser_page" as const, title: browser.title, url: browser.url };
-	const details: BrowserObservationDetails = { tool, kind: "browser_page", stateId: browser.snapshotId, baseStateId: base?.stateId, view: useDiff ? "diff" : "full", changes: useDiff ? transition?.changes : undefined, root, outline: browser.outline, renderedOutline: folded.text, detail: view?.detail };
-	const viewText = view
-		? view.text
-		: `Changes (${transition!.changedNodeCount}, ${base!.stateId} → ${browser.snapshotId}):\n${renderChanges(transition!.changes) || "(no element changes)"}\nUse stateId ${browser.snapshotId} for subsequent actions and queries.`;
-	return { content: [{ type: "text", text: `${tool} completed for ${root.ref} ${JSON.stringify(browser.title)}. State ${browser.snapshotId}.\n${viewText}` }], details };
+	const details: BrowserObservationDetails = { tool, kind: "browser_page", stateId: browser.snapshotId, baseStateId: base?.stateId, view: useDiff ? "diff" : "full", changes: useDiff ? transition?.changes : undefined, root, outline: browser.outline, renderedOutline: folded.text, detail: useV2 ? "compact" : view?.detail };
+	const v2Text = useV2 && snapshot
+		? `${formatObservation(snapshot, { stateId: browser.snapshotId })}${snapshot.clusters.length > 0 ? "\n(Clusters C1… group controls whose badges would overlap; member refs are listed under \"clusters\".)" : ""}`
+		: "";
+	const viewText = useV2
+		? v2Text
+		: view
+			? view.text
+			: `Changes (${transition!.changedNodeCount}, ${base!.stateId} → ${browser.snapshotId}):\n${renderChanges(transition!.changes) || "(no element changes)"}\nUse stateId ${browser.snapshotId} for subsequent actions and queries.`;
+	const advisoryText = tool === "observe_ui" && !imagesAllowed()
+		? "\n\nThis model cannot receive images: a vision-capable model is strongly recommended for computer use. If this task needs visual feedback, ask your user to switch models."
+		: "";
+	const content: AgentToolResult<BrowserObservationDetails>["content"] = [
+		{ type: "text", text: `${tool} completed for ${root.ref} ${JSON.stringify(browser.title)}. State ${browser.snapshotId}.\n${viewText}${advisoryText}` },
+	];
+	if (browser.image && snapshot && imagesAllowed()) {
+		const annotated = await tryRenderOverview(browserCaptureSource(browser), snapshot);
+		if (annotated) content.push({ type: "image", data: annotated.toString("base64"), mimeType: "image/png" });
+	}
+	return { content, details };
 }
 
 async function refreshBrowserSnapshot(contextId: string, tool: string, base?: { stateId: string; outline: SerializedOutline }): Promise<AgentToolResult<BrowserObservationDetails>> {
@@ -1673,10 +1693,12 @@ async function performObserve(params: ObserveParams, signal?: AbortSignal): Prom
 	if (isBrowserContextId(browserContextId)) {
 		const targetId = browserContextId.slice(BROWSER_CONTEXT_PREFIX.length);
 		const resourceKey = `cdp:${targetId}`;
-		const scheduled = await resourceScheduler.read(resourceKey, async () => await cdpSnapshotForContext(browserContextId));
+		const browserMode = params.mode ?? "fused";
+		const imagePolicy = browserMode === "semantic" ? "never" as const : browserMode === "visual" ? "always" as const : "auto" as const;
+		const scheduled = await resourceScheduler.read(resourceKey, async () => await cdpSnapshotForContext(browserContextId, { image: imagePolicy }));
 		const browser = scheduled.value;
 		if (!browser) throw new Error(`Browser context '${browserContextId}' is no longer available. Call find_roots again.`);
-		return browserObservationResult(browser, resourceKey, scheduled.epoch, "observe_ui", undefined, params.detail);
+		return await browserObservationResult(browser, resourceKey, scheduled.epoch, "observe_ui", undefined, params.detail);
 	}
 	const state = operationState();
 	const mode = params.mode ?? "fused";
@@ -1712,8 +1734,11 @@ async function performObserve(params: ObserveParams, signal?: AbortSignal): Prom
 async function performZoom(params: ZoomParams, _signal?: AbortSignal): Promise<AgentToolResult<ComputerUseDetails>> {
 	const state = operationState();
 	const capture = validateStateId(params.stateId);
+	const browser = state.browserSnapshot;
+	if (browser) return await performBrowserZoom(params, browser);
 	const look = currentLookOrThrow();
-	if (!look.image?.jpegBase64) throw new Error("zoom_ui needs an image-bearing observation. Observe with mode \"visual\", or a root that returns an image.");
+	const captureSource = captureSourceFromLook(look);
+	if (!captureSource) throw new Error("zoom_ui needs an image-bearing observation. Observe with mode \"visual\", or a root that returns an image.");
 	const target = state.currentTarget!;
 	const ref = trimOrUndefined(params.ref);
 	let rect: { x: number; y: number; w: number; h: number };
@@ -1721,7 +1746,7 @@ async function performZoom(params: ZoomParams, _signal?: AbortSignal): Promise<A
 	if (ref) {
 		const node = nodeByRef(state.currentOutline!, ref);
 		if (!node?.rect) throw new Error(`Ref '${ref}' has no geometry in the current outline.`);
-		rect = screenRectToCapture(look, node.rect);
+		rect = rectToCapture(captureSource, node.rect);
 		label = ref;
 	} else {
 		if (!Number.isFinite(params.x) || !Number.isFinite(params.y)) throw new Error("zoom_ui requires a ref or x/y coordinates.");
@@ -1730,15 +1755,11 @@ async function performZoom(params: ZoomParams, _signal?: AbortSignal): Promise<A
 		rect = { x: Math.round(params.x! - width / 2), y: Math.round(params.y! - height / 2), w: Math.round(width), h: Math.round(height) };
 		label = `${Math.round(params.x!)},${Math.round(params.y!)}`;
 	}
-	const zoom = Number.isFinite(params.zoom) ? Math.min(6, Math.max(0.5, params.zoom!)) : undefined;
+	const zoom = normalizeZoom(params.zoom);
 	const snapshot = observationSnapshot(look, target.appName);
-	const crop = await renderCrop(look, rect, { zoom, maxOutput: 1200, caption: `zoom ${label} — ${target.appName}` });
-	const inView = snapshot.elements.filter((element) =>
-		element.rect[0] < rect.x + rect.w && element.rect[0] + element.rect[2] > rect.x &&
-		element.rect[1] < rect.y + rect.h && element.rect[1] + element.rect[3] > rect.y);
-	const listing = inView.length > 0
-		? inView.map((element) => `${element.ref} ${element.role}${element.name ? ` "${element.name}"` : ""}`).join(" | ")
-		: "none";
+	const crop = await renderCrop(captureSource, rect, { zoom, maxOutput: 1200, caption: `zoom ${label} — ${target.appName}` });
+	const inView = snapshot.elements.filter((element) => element.rect && rectsIntersect(element.rect, rect));
+	const listing = inView.length > 0 ? inView.map(formatElementLine).join(" | ") : "none";
 	const content: AgentToolResult<ComputerUseDetails>["content"] = [
 		{ type: "text", text: `Zoomed ${label} (${rect.w}x${rect.h}) in ${target.appName} — ${target.windowTitle}. Elements in view: ${listing}.` },
 	];
@@ -1763,6 +1784,90 @@ async function performZoom(params: ZoomParams, _signal?: AbortSignal): Promise<A
 			coordinateSpace: "window-relative-screenshot-pixels",
 		},
 		lookId: look.lookId,
+		view: "full",
+		activation: emptyActivation(),
+		execution: executionTrace("look", "stealth"),
+		status: "ok",
+		config: getComputerUseConfig(),
+		helper: runtimeState.helperDiagnostics,
+	};
+	return { content, details };
+}
+
+function normalizeZoom(zoom: unknown): number | undefined {
+	return Number.isFinite(zoom) ? Math.min(6, Math.max(0.5, Number(zoom))) : undefined;
+}
+
+type RectLike = { x: number; y: number; w: number; h: number } | [number, number, number, number];
+
+function rectsIntersect(a: RectLike, region: { x: number; y: number; w: number; h: number }): boolean {
+	const x = Array.isArray(a) ? a[0] : a.x;
+	const y = Array.isArray(a) ? a[1] : a.y;
+	const w = Array.isArray(a) ? a[2] : a.w;
+	const h = Array.isArray(a) ? a[3] : a.h;
+	return x < region.x + region.w && x + w > region.x && y < region.y + region.h && y + h > region.y;
+}
+
+function formatElementLine(element: VisualElement): string {
+	return `${element.ref} ${element.role}${element.name ? ` "${element.name}"` : ""}`;
+}
+
+async function ensureBrowserImage(browser: CdpPageSnapshot): Promise<boolean> {
+	if (browser.image) return true;
+	const image = await cdpScreenshotForContext(browser.contextId, {
+		x: browser.scroll.x,
+		y: browser.scroll.y,
+		w: browser.viewport.width,
+		h: browser.viewport.height,
+	}).catch(() => undefined);
+	if (!image) return false;
+	browser.image = image;
+	return true;
+}
+
+/** Browser zoom: crops the viewport screenshot; coordinates are viewport CSS pixels. */
+async function performBrowserZoom(params: ZoomParams, browser: CdpPageSnapshot): Promise<AgentToolResult<ComputerUseDetails>> {
+	if (!(await ensureBrowserImage(browser))) throw new Error("zoom_ui could not capture a screenshot of the browser page. Check that the page is still open and retry.");
+	const captureSource = browserCaptureSource(browser)!;
+	const outline = restoreOutline(browser.outline);
+	const ref = trimOrUndefined(params.ref);
+	let viewportRect: { x: number; y: number; w: number; h: number };
+	let label: string;
+	if (ref) {
+		const node = nodeByRef(outline, ref);
+		if (!node?.rect) throw new Error(`Ref '${ref}' has no geometry in the current browser snapshot.`);
+		viewportRect = node.rect;
+		label = ref;
+	} else {
+		if (!Number.isFinite(params.x) || !Number.isFinite(params.y)) throw new Error("zoom_ui requires a ref or x/y coordinates.");
+		const width = Number.isFinite(params.w) ? Math.max(16, params.w!) : 320;
+		const height = Number.isFinite(params.h) ? Math.max(16, params.h!) : 240;
+		viewportRect = { x: Math.round(params.x! - width / 2), y: Math.round(params.y! - height / 2), w: Math.round(width), h: Math.round(height) };
+		label = `${Math.round(params.x!)},${Math.round(params.y!)}`;
+	}
+	const rect = rectToCapture(captureSource, viewportRect);
+	const zoom = normalizeZoom(params.zoom);
+	const crop = await renderCrop(captureSource, rect, { zoom, maxOutput: 1200, caption: `zoom ${label} — ${browser.title}` });
+	const inView = outline.nodes.filter((node) => node.ref && node.rect && rectsIntersect(node.rect, viewportRect));
+	const listing = inView.length > 0
+		? inView.slice(0, 12).map((node) => `${node.ref} ${node.role}${node.title ? ` "${node.title}"` : ""}`).join(" | ")
+		: "none";
+	const content: AgentToolResult<ComputerUseDetails>["content"] = [
+		{ type: "text", text: `Zoomed ${label} (${viewportRect.w}x${viewportRect.h}) viewport px in ${browser.title} — ${browser.url}. Elements in view: ${listing}.` },
+	];
+	if (imagesAllowed()) content.push({ type: "image", data: crop.toString("base64"), mimeType: "image/png" });
+	const details: ComputerUseDetails = {
+		tool: "zoom_ui",
+		target: { app: "Browser", pid: 0, windowTitle: browser.title, windowId: 0 },
+		capture: {
+			stateId: browser.snapshotId,
+			width: browser.viewport.width,
+			height: browser.viewport.height,
+			scaleFactor: browser.viewport.scale,
+			timestamp: browser.capturedAt,
+			coordinateSpace: "viewport-css-pixels",
+		},
+		lookId: browser.snapshotId,
 		view: "full",
 		activation: emptyActivation(),
 		execution: executionTrace("look", "stealth"),
@@ -2205,22 +2310,22 @@ async function performAct(params: ActParams, signal?: AbortSignal, _ctx?: Extens
 	if (actions.length === 0) throw new Error("act_ui.actions must contain at least one action.");
 	if (actions.length > 20) throw new Error("act_ui supports at most 20 actions per transaction.");
 	for (const action of actions) validateActionTarget(action);
-	if (operationState().contextId) {
-		if (actions.some((action) => action.action === "aim" || action.action === "commit")) {
-			throw new Error("aim/commit previews are desktop-only; browser pages are clicked by ref or coordinate directly.");
-		}
-		return await performBrowserTransaction(params, actions, signal);
-	}
 	const preview = await interceptAimPreview(params, actions, signal);
 	if (preview) return preview;
+	if (operationState().contextId) return await performBrowserTransaction(params, actions, signal);
 	return await performDesktopTransaction(params, actions, signal);
 }
 
 interface ArmedAim {
+	space: "desktop" | "browser";
 	x: number;
 	y: number;
-	lookId: string;
 	stateId: string;
+	/** Desktop: the look that armed the point. */
+	lookId?: string;
+	/** Browser: URL and scroll offsets at arm time. */
+	url?: string;
+	scroll?: [number, number];
 	button?: UiAction["button"];
 	clickCount?: number;
 }
@@ -2231,23 +2336,14 @@ let armedAim: ArmedAim | undefined;
  * Coordinate clicks preview by default (config `aim_preview`) when the active
  * model can see images: aim renders a crosshair overview plus a graticule crop
  * and arms the point; commit dispatches it once. Nothing is dispatched by aim.
+ * Browser pages preview against a viewport screenshot in viewport CSS pixels.
  */
-async function interceptAimPreview(params: ActParams, actions: UiAction[], signal?: AbortSignal): Promise<AgentToolResult<ComputerUseDetails | TerminalDesktopActionDetails> | undefined> {
+async function interceptAimPreview(params: ActParams, actions: UiAction[], signal?: AbortSignal): Promise<AgentToolResult<ComputerUseDetails | TerminalDesktopActionDetails | BrowserObservationDetails> | undefined> {
 	const aimActions = actions.filter((action) => action.action === "aim");
 	const commitActions = actions.filter((action) => action.action === "commit");
 	if (aimActions.length > 0 || commitActions.length > 0) {
 		if (actions.length !== 1) throw new Error("aim and commit must be the only action in the transaction.");
-		if (commitActions.length === 1) {
-			if (!armedAim) throw new Error("No armed aim point. Send act_ui with { action: \"aim\", x, y } first.");
-			const look = currentLookOrThrow();
-			if (armedAim.lookId !== look.lookId) {
-				armedAim = undefined;
-				throw new Error("The UI changed since the aim preview; aim again before committing.");
-			}
-			const click: UiAction = { action: "click", x: armedAim.x, y: armedAim.y, button: armedAim.button, clickCount: armedAim.clickCount, confirm: true };
-			armedAim = undefined;
-			return await performDesktopTransaction(params, [click], signal);
-		}
+		if (commitActions.length === 1) return await commitArmedAim(params, signal);
 		const aim = aimActions[0];
 		if (!Number.isFinite(aim.x) || !Number.isFinite(aim.y)) throw new Error("aim requires x/y coordinates.");
 		if (!imagesAllowed()) throw new Error("Aim previews need a vision-capable model. Pass confirm: true on a coordinate click to dispatch without a preview.");
@@ -2263,22 +2359,47 @@ async function interceptAimPreview(params: ActParams, actions: UiAction[], signa
 	return await aimPreviewResult(params, { x: click.x!, y: click.y! }, signal, click);
 }
 
+/** Dispatches a previously armed aim point once; guards desktop looks and browser scroll/navigation. */
+async function commitArmedAim(params: ActParams, signal?: AbortSignal): Promise<AgentToolResult<ComputerUseDetails | TerminalDesktopActionDetails | BrowserObservationDetails>> {
+	if (!armedAim) throw new Error("No armed aim point. Send act_ui with { action: \"aim\", x, y } first.");
+	const armed = armedAim;
+	armedAim = undefined;
+	const click: UiAction = { action: "click", x: armed.x, y: armed.y, button: armed.button, clickCount: armed.clickCount, confirm: true };
+	if (armed.space === "browser") {
+		const browser = operationState().browserSnapshot;
+		if (!browser || browser.snapshotId !== armed.stateId) throw new Error("The page changed since the aim preview; aim again before committing.");
+		const fresh = await cdpPageStateForContext(browser.contextId);
+		if (!fresh) throw new Error("The browser page is no longer available; observe it again.");
+		if (armed.url && fresh.url !== armed.url) throw new Error("The page navigated since the aim preview; aim again before committing.");
+		if (armed.scroll && (Math.abs(fresh.scrollX - armed.scroll[0]) > 0.5 || Math.abs(fresh.scrollY - armed.scroll[1]) > 0.5)) {
+			throw new Error("The page scrolled since the aim preview; aim again before committing.");
+		}
+		return await performBrowserTransaction(params, [click], signal);
+	}
+	const look = currentLookOrThrow();
+	if (armed.lookId !== look.lookId) throw new Error("The UI changed since the aim preview; aim again before committing.");
+	return await performDesktopTransaction(params, [click], signal);
+}
+
 async function aimPreviewResult(params: ActParams, point: { x: number; y: number }, signal?: AbortSignal, source?: UiAction): Promise<AgentToolResult<ComputerUseDetails>> {
 	const state = operationState();
 	const capture = validateStateId(params.stateId);
+	const browser = state.browserSnapshot;
+	if (browser) return await browserAimPreview(browser, point, source);
 	const look = currentLookOrThrow();
 	ensurePointIsInLookImage(point.x, point.y, look, "aim coordinates");
 	const target = state.currentTarget!;
+	const captureSource = captureSourceFromLook(look)!;
 	const snapshot = observationSnapshot(look, target.appName);
-	const preview = await renderAimPreview(look, snapshot, point, { maxEdge: captureMaxEdge(look) });
-	armedAim = { x: point.x, y: point.y, lookId: look.lookId, stateId: capture.stateId, button: source?.button, clickCount: source?.clickCount };
+	const preview = await renderAimPreview(captureSource, snapshot, point, { maxEdge: captureMaxEdge(captureSource) });
+	armedAim = { space: "desktop", x: point.x, y: point.y, stateId: capture.stateId, lookId: look.lookId, button: source?.button, clickCount: source?.clickCount };
 	const frame = look.window.framePoints;
-	const scaleX = (look.image?.width ?? frame.w) / Math.max(1, frame.w);
-	const scaleY = (look.image?.height ?? frame.h) / Math.max(1, frame.h);
+	const scaleX = captureSource.image.width / Math.max(1, frame.w);
+	const scaleY = captureSource.image.height / Math.max(1, frame.h);
 	const screenX = Math.round(frame.x + point.x / scaleX);
 	const screenY = Math.round(frame.y + point.y / scaleY);
 	const under = elementAt(snapshot, point.x, point.y)[0];
-	const hit = under ? `${under.ref} ${under.role}${under.name ? ` "${under.name}"` : ""}` : "no element";
+	const hit = under ? formatElementLine(under) : "no element";
 	const details: ComputerUseDetails = {
 		tool: "act_ui",
 		target: {
@@ -2308,6 +2429,47 @@ async function aimPreviewResult(params: ActParams, point: { x: number; y: number
 	};
 	const content: AgentToolResult<ComputerUseDetails>["content"] = [
 		{ type: "text", text: `Aim preview at screen (${screenX},${screenY}) in ${target.appName} — ${target.windowTitle}. Under the point: ${hit}. Nothing was dispatched. Send act_ui { action: "commit" } to click this point once, or aim at another point.` },
+		{ type: "image", data: preview.overview.toString("base64"), mimeType: "image/png" },
+		{ type: "image", data: preview.crop.toString("base64"), mimeType: "image/png" },
+	];
+	return { content, details };
+}
+
+/** Browser aim preview: viewport coordinates against a viewport screenshot. */
+async function browserAimPreview(browser: CdpPageSnapshot, point: { x: number; y: number }, source?: UiAction): Promise<AgentToolResult<ComputerUseDetails>> {
+	if (!(await ensureBrowserImage(browser))) {
+		throw new Error("Aim previews need a screenshot of the browser page, which could not be captured. Retry observe_ui, or pass confirm: true to click without a preview.");
+	}
+	const captureSource = browserCaptureSource(browser)!;
+	const snapshot = buildBrowserSnapshot(browser);
+	const scaleX = captureSource.image.width / Math.max(1, captureSource.size[0]);
+	const scaleY = captureSource.image.height / Math.max(1, captureSource.size[1]);
+	const pointCapture = { x: point.x * scaleX, y: point.y * scaleY };
+	const preview = await renderAimPreview(captureSource, snapshot, pointCapture, { maxEdge: captureMaxEdge(captureSource) });
+	armedAim = { space: "browser", x: point.x, y: point.y, stateId: browser.snapshotId, url: browser.url, scroll: [browser.scroll.x, browser.scroll.y], button: source?.button, clickCount: source?.clickCount };
+	const under = elementAt(snapshot, pointCapture.x, pointCapture.y)[0];
+	const hit = under ? formatElementLine(under) : "no element";
+	const details: ComputerUseDetails = {
+		tool: "act_ui",
+		target: { app: "Browser", pid: 0, windowTitle: browser.title, windowId: 0 },
+		capture: {
+			stateId: browser.snapshotId,
+			width: browser.viewport.width,
+			height: browser.viewport.height,
+			scaleFactor: browser.viewport.scale,
+			timestamp: browser.capturedAt,
+			coordinateSpace: "viewport-css-pixels",
+		},
+		lookId: browser.snapshotId,
+		view: "full",
+		activation: emptyActivation(),
+		execution: executionTrace("act", "stealth", { outcome: "unknown" }),
+		status: "ok",
+		config: getComputerUseConfig(),
+		helper: runtimeState.helperDiagnostics,
+	};
+	const content: AgentToolResult<ComputerUseDetails>["content"] = [
+		{ type: "text", text: `Aim preview at viewport (${Math.round(point.x)},${Math.round(point.y)}) in ${browser.title} — ${browser.url}. Under the point: ${hit}. Nothing was dispatched. Send act_ui { action: "commit" } to click this point once, or aim at another point.` },
 		{ type: "image", data: preview.overview.toString("base64"), mimeType: "image/png" },
 		{ type: "image", data: preview.crop.toString("base64"), mimeType: "image/png" },
 	];

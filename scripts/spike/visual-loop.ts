@@ -1,7 +1,7 @@
 import fs from "node:fs/promises";
 import path from "node:path";
 import { linuxBackend } from "../../src/platform/linux/backend.ts";
-import { renderAimPreview, renderOverview } from "../../src/visual/overlays.ts";
+import { captureSourceFromLook, renderAimPreview, renderOverview } from "../../src/visual/overlays.ts";
 import { buildVisualSnapshot, describeClusters, elementAt } from "../../src/visual/snapshot.ts";
 
 const AIM_ROLES = new Set(["push button", "button", "link", "tab", "menu item", "check box", "checkbox", "radio button", "combo box", "slider", "spin button"]);
@@ -33,21 +33,24 @@ const frame = look.window.framePoints;
 console.log(`window: ${root.appName ?? "?"} "${root.title}" frame=(${frame.x},${frame.y}) ${frame.w}x${frame.h} capture=${look.image?.width ?? 0}x${look.image?.height ?? 0}`);
 
 const snapshot = buildVisualSnapshot(look, { app: root.appName ?? "", maxEdge });
+const source = captureSourceFromLook(look);
+if (!source) throw new Error("The observation returned no capture image.");
+const renderEdge = Math.max(1, source.image.width, source.image.height);
 await fs.mkdir(outDir, { recursive: true });
 await fs.writeFile(path.join(outDir, "snapshot.json"), `${JSON.stringify(snapshot, null, 2)}\n`);
 console.log(`elements: ${snapshot.elements.length}, clusters: ${snapshot.clusters.length}, text blocks: ${snapshot.text.length}`);
 for (const line of describeClusters(snapshot)) console.log(`  ${line}`);
 
-await fs.writeFile(path.join(outDir, "overview.png"), await renderOverview(look, snapshot, { maxEdge }));
+await fs.writeFile(path.join(outDir, "overview.png"), await renderOverview(source, snapshot, { maxEdge: renderEdge }));
 
 const aimed = snapshot.elements
-	.filter((element) => element.name && AIM_ROLES.has(element.role) && element.rect[2] >= 24 && element.rect[3] >= 16)
-	.sort((a, b) => b.rect[2] * b.rect[3] - a.rect[2] * a.rect[3])[0]
-	?? snapshot.elements.find((element) => element.name)
-	?? snapshot.elements[0];
-if (!aimed) throw new Error("No interactive elements were found to aim at.");
+	.filter((element) => element.rect && element.name && AIM_ROLES.has(element.role) && element.rect[2] >= 24 && element.rect[3] >= 16)
+	.sort((a, b) => b.rect![2] * b.rect![3] - a.rect![2] * a.rect![3])[0]
+	?? snapshot.elements.find((element) => element.rect && element.name)
+	?? snapshot.elements.find((element) => element.rect);
+if (!aimed?.rect) throw new Error("No interactive elements were found to aim at.");
 const aim = { x: Math.round(aimed.rect[0] + aimed.rect[2] / 2), y: Math.round(aimed.rect[1] + aimed.rect[3] / 2) };
-const preview = await renderAimPreview(look, snapshot, aim, { maxEdge });
+const preview = await renderAimPreview(source, snapshot, aim, { maxEdge: renderEdge });
 await fs.writeFile(path.join(outDir, "aim-overview.png"), preview.overview);
 await fs.writeFile(path.join(outDir, "aim-crop.png"), preview.crop);
 

@@ -8,6 +8,9 @@ tmp/
 results/
 scripts/cubench-results.json
 
+# Local prototype output
+spike-out/
+
 # Rust build artifacts
 native/linux/bridge-rs/target/
 

@@ -50,13 +50,17 @@
 		"test:lifecycle": "tsx scripts/check-session-lifecycle.mjs",
 		"test:runtime": "tsx scripts/check-runtime-concurrency.mjs",
 		"test:output": "tsx scripts/check-bounded-output.mjs",
+		"test:visual": "tsx scripts/check-visual.mjs",
 		"test:package-assets": "node scripts/check-package-assets.mjs",
 		"test:act-outcomes": "tsx scripts/check-act-outcomes.mjs",
-		"test": "npm run typecheck && npm run test:schema && npm run test:find-params && npm run test:output && npm run test:lifecycle && npm run test:runtime && npm run test:linux && npm run test:linux-scripts && npm run test:act-outcomes",
+		"test": "npm run typecheck && npm run test:schema && npm run test:find-params && npm run test:output && npm run test:visual && npm run test:lifecycle && npm run test:runtime && npm run test:linux && npm run test:linux-scripts && npm run test:act-outcomes",
 		"build:linux": "node scripts/build-native.mjs --platform linux",
 		"test:linux": "tsx scripts/check-platform-linux.mjs",
 		"test:linux-scripts": "node scripts/check-linux-build-scripts.mjs",
 		"test:linux-live": "PI_CU_LIVE=1 tsx scripts/check-linux-live.mjs"
+	},
+	"dependencies": {
+		"jimp": "^0.22.12"
 	},
 	"peerDependencies": {
 		"@earendil-works/pi-ai": "*",
@@ -65,7 +69,6 @@
 	},
 	"devDependencies": {
 		"@types/node": "^26.1.1",
-		"jimp": "^0.22.12",
 		"tsx": "^4.23.1",
 		"typescript": "^7.0.2"
 	}

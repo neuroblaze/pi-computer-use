@@ -17,7 +17,7 @@ const [buildSource, setupSource, packageSource, helperSource, waylandSource, nat
 	fs.readFile(path.join(rootDir, "native", "linux", "bridge-rs", "src", "main.rs"), "utf8"),
 ]);
 const pkg = JSON.parse(packageSource);
-assert.match(buildSource, /explicitPlatform === "linux"/);
+assert.match(buildSource, /explicitPlatform && explicitPlatform !== "linux"/);
 assert.match(buildSource, /prebuilt", "linux", arch, "linux-bridge"/);
 assert.match(buildSource, /x86_64-unknown-linux-gnu/);
 assert.match(buildSource, /aarch64-unknown-linux-gnu/);
@@ -37,24 +37,9 @@ const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "pi-computer-use-linux-s
 const helperDest = path.join(tempDir, "linux-bridge");
 try {
 	const fixtureScriptsDir = path.join(tempDir, "scripts");
-	const fixtureHelperPathDir = path.join(tempDir, "src", "platform", "macos");
-	await Promise.all([
-		fs.mkdir(fixtureScriptsDir, { recursive: true }),
-		fs.mkdir(fixtureHelperPathDir, { recursive: true }),
-	]);
-	await Promise.all([
-		fs.copyFile(path.join(scriptsDir, "setup-helper.mjs"), path.join(fixtureScriptsDir, "setup-helper.mjs")),
-		fs.copyFile(
-			path.join(rootDir, "src", "platform", "macos", "helper-path.mjs"),
-			path.join(fixtureHelperPathDir, "helper-path.mjs"),
-		),
-	]);
-	let fixtureEntry = path.join(fixtureScriptsDir, "setup-helper.mjs");
-	const linkedTempDir = `${tempDir}-link`;
-	if (process.platform !== "win32") {
-		await fs.symlink(tempDir, linkedTempDir);
-		fixtureEntry = path.join(linkedTempDir, "scripts", "setup-helper.mjs");
-	}
+	await fs.mkdir(fixtureScriptsDir, { recursive: true });
+	await fs.copyFile(path.join(scriptsDir, "setup-helper.mjs"), path.join(fixtureScriptsDir, "setup-helper.mjs"));
+	const fixtureEntry = path.join(fixtureScriptsDir, "setup-helper.mjs");
 	const result = await new Promise((resolve) => {
 		const child = spawn(process.execPath, [fixtureEntry, "--platform", "linux"], { env: { ...process.env, PI_COMPUTER_USE_LINUX_HELPER_PATH: helperDest }, stdio: ["ignore", "pipe", "pipe"] });
 		let output = "";
@@ -65,7 +50,6 @@ try {
 	assert.match(result.output, /No Linux prebuilt helper found for (x64|arm64)/);
 	assert.equal(await fs.stat(helperDest).then(() => true, () => false), false);
 } finally {
-	await fs.rm(`${tempDir}-link`, { force: true });
 	await fs.rm(tempDir, { recursive: true, force: true });
 }
 console.log("Linux build/setup script checks passed");

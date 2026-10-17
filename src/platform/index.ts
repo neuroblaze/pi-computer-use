@@ -1,40 +1,16 @@
-import { macosBackend } from "./macos/backend.ts";
-import { isBrowserApp, isChromeFamilyApp, openBrowserLocationWithAppleScript } from "./macos/browser.ts";
-import { ensureMacosReady } from "./macos/permissions.ts";
-import type { ComputerUsePlatformBackend, PlatformName } from "./types.ts";
 import { linuxBackend } from "./linux/backend.ts";
-import { windowsBackend } from "./windows/backend.ts";
-
-const macosPlatformBackend: ComputerUsePlatformBackend = {
-	name: "macos",
-	shutdown: macosBackend.shutdown,
-	setActivity: macosBackend.setActivity,
-	ensureReady: ensureMacosReady,
-	listApps: macosBackend.listApps,
-	listRoots: macosBackend.listRoots,
-	getFrontmost: macosBackend.getFrontmost,
-	focusWindow: macosBackend.focusWindow,
-	observe: macosBackend.observe,
-	act: macosBackend.act,
-	actBatch: macosBackend.actBatch,
-	readText: macosBackend.readText,
-	waitFor: macosBackend.waitFor,
-	isBrowserApp,
-	isChromeFamilyApp,
-	openBrowserLocation: openBrowserLocationWithAppleScript,
-};
+import type { ComputerUsePlatformBackend } from "./types.ts";
 
 class UnsupportedPlatformBackend implements ComputerUsePlatformBackend {
-	readonly name: PlatformName;
+	readonly name = "linux" as const;
 	private readonly platform: NodeJS.Platform;
 
 	constructor(platform: NodeJS.Platform) {
 		this.platform = platform;
-		this.name = platform === "win32" ? "windows" : "linux";
 	}
 
 	private unsupported(): never {
-		throw new Error(`pi-computer-use does not support platform '${this.platform}' yet.`);
+		throw new Error(`This fork supports Linux only; platform '${this.platform}' is not supported.`);
 	}
 
 	async ensureReady(): Promise<never> { this.unsupported(); }
@@ -52,8 +28,6 @@ class UnsupportedPlatformBackend implements ComputerUsePlatformBackend {
 }
 
 export function platformBackendForRuntime(platform: NodeJS.Platform = process.platform): ComputerUsePlatformBackend {
-	if (platform === "darwin") return macosPlatformBackend;
-	if (platform === "win32") return windowsBackend;
 	if (platform === "linux") return linuxBackend;
 	return new UnsupportedPlatformBackend(platform);
 }

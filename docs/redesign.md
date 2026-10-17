@@ -47,7 +47,7 @@ Rules:
 
 Rules:
 
-- **Flat list, no tree, no containers.** Roles normalized to a small vocabulary; `panel`, `frame`, `document`, `static` are structure, not elements. In the prototype, this cut 240 AT-SPI nodes to 26 elements.
+- **Flat list, no tree, no containers.** Roles normalized to a small vocabulary; `panel`, `frame`, `document`, `static` are structure, not elements. In the prototype, this cut 240 AT-SPI nodes to 25 elements.
 - **Capture-relative.** Only nodes that intersect the captured image are listed; AT-SPI rects can extend outside it (window decorations, `y = -10` controls). Rectangles stay in screen coordinates; the image is a scaled view with a known origin.
 - **Sanitized values.** No U+FFFC, no D-Bus paths, no duplicated statics; window title does not leak into body text.
 - **Text in one reading-order block**, capped (~2 KB) with continuation through `read`.
@@ -96,7 +96,7 @@ Caveats: single 8-card run; isolated high-contrast targets; measured through thi
 
 `scripts/spike/visual-loop.ts` (run with `node_modules/.bin/tsx` inside an X11 session; `jimp` is a devDependency) observes a live window through the fork's Linux backend and writes `snapshot.json`, `overview.png`, `aim-overview.png`, `aim-crop.png`.
 
-It already demonstrates: capture-relative mapping, the element filter (240 → 26 nodes), text extraction, numbered badges, the crosshair preview, and the graticule crop.
+It already demonstrates: capture-relative mapping, the element filter (240 → 25 nodes), text extraction, numbered badges, the crosshair preview, and the graticule crop.
 
 Known gaps: dense-toolbar badges still overlap; no confirm/commit state machine yet (the prototype renders the preview, it does not dispatch); `jimp` is a stand-in for wherever overlays eventually live.
 

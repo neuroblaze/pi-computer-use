@@ -1,6 +1,6 @@
 # v2 redesign: the model-facing contract
 
-Status: design accepted (2026-10-16); implementation in progress (M1/M2). Scope: Linux/X11. Baseline: upstream `main` at `67e9e2f` (post-#103).
+Status: v2 tools wired (2026-10-17); live E2E in `scripts/check-visual-live.mjs`. Scope: Linux/X11. Baseline: upstream `main` at `67e9e2f` (post-#103).
 
 ## Goals
 
@@ -27,6 +27,10 @@ Rules:
 - **Validate before dispatch.** If any step in a batch is invalid, nothing is dispatched; the error names the step and the valid alternatives.
 - **Always report outcomes.** Every act returns a compact change report (`changed`, `focused`, `appeared`, `removed`). `changed: false` is a signal, not a success.
 - **Text-only models still work**, minus the visual modality. The extension reads the active model's input modalities (`ctx.model.input`, `"text" | "image"`), omits images, and adds a one-line advisory that a vision-capable model is strongly recommended for computer use, with the agent offering to switch.
+
+**Wired now (2026-10-17):** observation JSON in `observe_ui` compact views; per-cluster listing; annotated overviews wherever images are attached; `zoom_ui`; coordinate-click aim preview (`aim_preview`, default on) with `commit` and `confirm: true`; the modality advisory.
+
+**Still upstream for now:** refs/state epochs (no auto-refresh on stale state), outline-based `search_ui`/`expand_ui`/`inspect_ui`, browser-page snapshots, and post-click hit reports.
 
 ## Snapshot (JSON)
 
@@ -62,7 +66,7 @@ Rules:
 
 ### Overview rendering
 
-- Window capture scaled to a canonical max edge (default **1536**; config `images: off | 1024 | 1536 | native`). Overlays are drawn **after** scaling so they stay crisp.
+- The helper capture is already scaled (900 px in fused mode, 1600 px in visual mode); overlays are drawn at capture scale, after any scaling, so they stay crisp.
 - Element outline: 4 px black under-stroke + 2 px orange. Badge: 18 px circle with a 14 px numeral, offset above-left of the target (inside the corner when there is no room). Clustered elements get one marker instead of colliding badges.
 - Rulers: edge strips with **screen-coordinate** labels roughly every 10 % (minimum ~96 px at render scale), labels ≥ 10 px. **No fine grid on the overview** — after provider downscaling it aliases into mush; 10 px guides only belong in crops.
 
@@ -70,18 +74,17 @@ Rules:
 
 ### Zoom
 
-- `zoom {id | x,y,w,h}` returns a native-resolution crop, upscaled ×2–3 (output capped near 1500 px) with a fine graticule: 10 px minor lines, 50 px major lines, labels every 50 px in screen coordinates.
+- `zoom_ui {ref | x,y,w,h}` returns a native-resolution crop with a fine graticule: 10 px minor lines, 50 px major lines, labels every 50 px in screen coordinates. Element crops auto-fit (output capped near 1200 px, upscale ≤ 6×).
 - Upscaling is the only way to move detail below the provider's encoder patch size; it is the magnifier the overview cannot be.
 
 ![aim crop with graticule](images/visual-loop-aim-crop.png)
 
 ### Aim → verify → commit (pixel fallback)
 
-- `act {steps:[{aim:{x,y}}]}` renders a preview: overview with crosshair **plus** a crop centered on the point, and reports the element under it. Nothing is dispatched. The result is an armed state.
-- `act {steps:[{commit:true}]}` dispatches the click; a new `aim` replaces the pending point; any new `observe` expires it. Cap at two adjustments, then commit.
-- **Preview is on by default.** It triggers when the point is not inside a confident element, when the element is smaller than ~40 px, or when nothing is under the point; large, well-known targets skip it. Disable with `aim_preview: false` in the config.
-- Every coordinate click — previewed or not — reports the element under the point and whether anything changed. Failures become informative instead of silent.
-- Anchor clicks cover the middle ground: `{click: {id, anchor: "center" | "left" | "right" | [fx, fy]}}` for sliders and drag tracks, where the position *within* an element matters but pixels should not.
+- `act_ui {actions:[{aim:{x,y}}]}` renders a preview: overview with crosshair **plus** a native crop centered on the point, and reports the element under it. Nothing is dispatched; the result arms the point.
+- `act_ui {actions:[{commit}]}` dispatches the armed click once; any new look (a new observation or a completed action) expires it.
+- **Preview is on by default.** A lone coordinate click previews automatically; `confirm: true` on the click dispatches immediately. Disable entirely with `aim_preview: false`. Text-only models skip previews (they cannot see them) and dispatch directly.
+- Still pending: post-click hit reports (element under the point + `changed: false` signals) and anchor clicks (`{click: {id, anchor: …}}`) for sliders and drag tracks.
 
 ## Baseline: DeepSeek V4.1 Flash
 
@@ -97,13 +100,18 @@ Implications:
 
 Caveats: single 8-card run; isolated high-contrast targets; measured through this machine's opencode image pipeline (pi may deliver images differently); self-administered scoring (truth withheld until guesses existed).
 
-## Prototype
+## Implementation
 
-The snapshot builder and overlays live in [`src/visual`](../src/visual) (`snapshot.ts`, `overlays.ts`), with unit checks in `scripts/check-visual.mjs`; `jimp` is a runtime dependency (decision 2026-10-16: overlays stay in TypeScript). `scripts/spike/visual-loop.ts` dogfoods the module: run it with `node_modules/.bin/tsx` inside an X11 session and it writes `snapshot.json`, `overview.png`, `aim-overview.png`, `aim-crop.png`.
+`src/visual` (`snapshot.ts`, `format.ts`, `overlays.ts`) holds the observation model; `jimp` is a runtime dependency (overlays stay in TypeScript). The Pi tools call it directly:
 
-It already demonstrates: capture-relative mapping, the element filter (240 → 25 nodes), cluster detection for dense toolbars, text extraction, numbered badges, the crosshair preview, and the graticule crop.
+- `observe_ui` compact views return the JSON observation (`formatObservation`); the annotated overview is attached wherever the image policy attaches an image (`mode: "visual"` always, fused on fallback).
+- `act_ui` gains `aim` / `commit`; lone coordinate clicks preview by default (`aim_preview`, default on; `confirm: true` bypasses). Previews are desktop-only and skip text-only models.
+- `zoom_ui` renders a native-resolution crop of a ref or region.
+- The modality advisory appears when `ctx.model.input` lacks `"image"`.
 
-Known gaps: the module is not wired to the Pi tools yet; no confirm/commit state machine (the preview does not dispatch); Chromium exposes some chrome controls with duplicated or degenerate rects near the window origin (e.g. "Tab search" reported twice, once at `y = -4`), which currently surface as corner clusters — deduping those is the next filtering task.
+Checks: `scripts/check-visual.mjs` (unit) and `scripts/check-visual-live.mjs` (`PI_CU_LIVE=1`; Xvfb + zenity) drives observation → zoom → aim → commit end to end. `scripts/spike/visual-loop.ts` remains the standalone renderer demo.
+
+Known gaps: post-click hit reports; browser pages have no aim preview yet; Chromium reports some chrome controls with duplicated or degenerate rects near the window origin (e.g. "Tab search" twice, once at `y = -4`), which surface as corner clusters; and GTK apps under the computer-use image report degenerate `(0, 0)` extents through AT-SPI (zenity), so their observations can list no elements. Both need a helper-side geometry pass.
 
 ## Decisions (2026-10-16)
 

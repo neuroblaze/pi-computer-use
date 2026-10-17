@@ -92,6 +92,7 @@ function containsEditable(node: OutlineNode): boolean {
 
 export function prepareAction(action: UiAction, state: ActionState, env: ActionEnvironment): PreparedAction {
 	const operation = action.action;
+	if (operation === "aim" || operation === "commit") throw new Error(`${operation} is an aim-preview action and is not dispatched directly.`);
 	const usesCurrentFocus = !env.headless && state.currentFocus && !action.ref && (operation === "typeText" || operation === "keypress");
 	const target = usesCurrentFocus ? focusedTarget(env) : nativeTarget(action, operation, env);
 	const establishesFocus = !env.headless && Boolean(action.ref) && (operation === "click" || operation === "press") && containsEditable(env.node(action.ref!));

@@ -47,7 +47,7 @@ rootsAfter([{ pid: 99, rootRef: "ax:dlg", windowRef: "ax:dlg" }]);
 result = await terminalDesktopActionResult(target, "s1", { strategy: "act" }, new Error("x"));
 assert.equal(result.details.status, "target_closed");
 
-const uiNode = (ref, title, role = "AXButton", fields = {}) => ({ ref, role, subrole: "", identifier: "", title, description: "", value: "", actions: ["AXPress"], canPress: true, canFocus: false, canSetValue: false, canScroll: false, canIncrement: false, canDecrement: false, isTextInput: false, focused: false, offscreen: false, pictureOnly: false, truncated: false, text: [], children: [], ...fields });
+const uiNode = (ref, title, role = "AXButton", fields = {}) => ({ ref, role, subrole: "", identifier: "", title, description: "", value: "", actions: ["AXPress"], canPress: true, canFocus: false, canSetValue: false, canScroll: false, canIncrement: false, canDecrement: false, isTextInput: false, focused: false, offscreen: false, pictureOnly: false, truncated: false, rect: { x: 0, y: 0, w: 20, h: 20 }, text: [], children: [], ...fields });
 const outlineOf = (rootNode) => {
 	const nodes = [];
 	const visit = (current, parent) => {
@@ -61,12 +61,25 @@ const outlineOf = (rootNode) => {
 const passiveNode = (ref, title, role, children = []) => uiNode(ref, title, role, { actions: [], canPress: false, children });
 const buttons = outlineOf(passiveNode("@e1", "Doc", "AXWindow", [uiNode("@e2", "Save"), passiveNode("@e3", "Body", "AXStaticText")]));
 const canvas = outlineOf(passiveNode("@e1", "Canvas", "AXWindow", [passiveNode("@e2", "Body", "AXStaticText")]));
-const capture = (outline, stateId) => ({ target: { appName: "App", pid: 7, windowTitle: "Doc", windowId: 5 }, capture: { stateId, width: 0, height: 0, scaleFactor: 1, timestamp: 0 }, look: { lookId: "look" }, outline, activation: {} });
+const capture = (outline, stateId) => ({
+	target: { appName: "App", pid: 7, windowTitle: "Doc", windowId: 5 },
+	capture: { stateId, width: 0, height: 0, scaleFactor: 1, timestamp: 0 },
+	look: { lookId: "look", window: { framePoints: { x: 0, y: 0, w: 400, h: 300 }, scaleFactor: 1 }, parsedOutline: outline, outline: outline.root },
+	outline,
+	activation: {},
+});
 const buildToolResult = (...args) => testing.runInOperation(() => testing.buildToolResult(...args));
+const parseObservation = (result) => {
+	const body = text(result);
+	return JSON.parse(body.slice(body.indexOf("{"), body.lastIndexOf("}") + 1));
+};
 
 result = await buildToolResult("observe_ui", "Observed.", capture(buttons, "S1"), {}, undefined, "never");
-assert.equal(text(result), 'Observed.\n\nControls (1 of 3 nodes, stateId S1, root @e1):\n@e2 button "Save"\n… 2 other nodes hidden. Use search_ui to find more; expand_ui({ stateId: "S1", ref: "@e1", depth: 2 }) or observe_ui detail "outline" for structure.');
 assert.equal(result.details.detail, "compact");
+const observation = parseObservation(result);
+assert.equal(observation.state, "S1");
+assert.deepEqual(observation.elements, [{ ref: "@e2", role: "button", name: "Save", rect: [0, 0, 20, 20] }]);
+assert.deepEqual(observation.text, []);
 assert.equal(result.details.renderedOutline, foldToBudget(buttons).text, "details.renderedOutline keeps the folded text");
 
 result = await buildToolResult("observe_ui", "Observed.", capture(buttons, "S1"), {}, undefined, "never", undefined, "outline");
@@ -74,8 +87,10 @@ assert.equal(text(result), `Observed.\n\nOutline (3 nodes, stateId S1):\n${foldT
 assert.equal(result.details.detail, "outline");
 
 result = await buildToolResult("observe_ui", "Observed.", capture(canvas, "S2"), {}, undefined, "never");
-assert.equal(text(result), `Observed.\n\nOutline (2 nodes, stateId S2, no actionable controls found):\n${foldToBudget(canvas).text}`, "zero controls must fall back to the fold and say so");
-assert.equal(result.details.detail, "outline");
+assert.equal(result.details.detail, "compact");
+const emptyObservation = parseObservation(result);
+assert.deepEqual(emptyObservation.elements, []);
+assert.deepEqual(emptyObservation.text, []);
 
 const replaced = outlineOf(passiveNode("@e1", "Sheet", "AXSheet", [uiNode("@e4", "OK")]));
 result = await buildToolResult("act_ui", "Acted.", capture(replaced, "S3"), {}, undefined, "never", { stateId: "S1", outline: buttons });

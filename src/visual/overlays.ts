@@ -1,6 +1,6 @@
 import Jimp from "jimp";
-import type { LookResponse } from "../outline.ts";
-import { DEFAULT_MAX_EDGE, elementAt, type VisualSnapshot } from "./snapshot.ts";
+import type { LookResponse, OutlineRect } from "../outline.ts";
+import { DEFAULT_MAX_EDGE, badgeLabel, elementAt, type VisualSnapshot } from "./snapshot.ts";
 
 const BLACK = Jimp.rgbaToInt(0, 0, 0, 255);
 const WHITE = Jimp.rgbaToInt(255, 255, 255, 255);
@@ -108,17 +108,17 @@ function drawRulers(img: Img, font: LoadedFont, originX: number, originY: number
 }
 
 function drawElements(img: Img, font: LoadedFont, snapshot: VisualSnapshot, scale: number): void {
-	const clustered = new Set<number>();
+	const clustered = new Set<string>();
 	for (const cluster of snapshot.clusters) {
-		for (const id of cluster.elements) clustered.add(id);
+		for (const ref of cluster.refs) clustered.add(ref);
 	}
 	for (const element of snapshot.elements) {
 		const [x, y, w, h] = element.rect.map((value) => value * scale) as [number, number, number, number];
 		strokeRect(img, x, y, Math.max(w, 2), Math.max(h, 2), 4, BLACK);
 		strokeRect(img, x, y, Math.max(w, 2), Math.max(h, 2), 2, ORANGE);
-		if (clustered.has(element.id)) continue;
+		if (clustered.has(element.ref)) continue;
 		const badgeY = y - 13 > 16 ? y - 13 : y + 13;
-		badge(img, font, x + 11, badgeY, String(element.id));
+		badge(img, font, x + 11, badgeY, badgeLabel(element.ref));
 	}
 	for (const cluster of snapshot.clusters) {
 		badge(img, font, cluster.at[0] * scale, cluster.at[1] * scale, cluster.id);
@@ -137,6 +137,84 @@ export async function renderOverview(look: LookResponse, snapshot: VisualSnapsho
 	drawRulers(image, await font8(), frame.x, frame.y, frame.w, frame.h);
 	drawElements(image, await font16(), snapshot, scale);
 	return await image.getBufferAsync(Jimp.MIME_PNG);
+}
+
+export interface CaptureRect {
+	x: number;
+	y: number;
+	w: number;
+	h: number;
+}
+
+/** Maps an AT-SPI (screen-space) rect into capture-relative pixels. */
+export function screenRectToCapture(look: LookResponse, rect: OutlineRect): CaptureRect {
+	const frame = look.window.framePoints;
+	const captureW = Math.max(1, look.image?.width ?? Math.round(frame.w));
+	const captureH = Math.max(1, look.image?.height ?? Math.round(frame.h));
+	const scaleX = captureW / Math.max(1, frame.w);
+	const scaleY = captureH / Math.max(1, frame.h);
+	return {
+		x: Math.round((rect.x - frame.x) * scaleX),
+		y: Math.round((rect.y - frame.y) * scaleY),
+		w: Math.round(rect.w * scaleX),
+		h: Math.round(rect.h * scaleY),
+	};
+}
+
+export interface CropOptions {
+	zoom?: number;
+	maxOutput?: number;
+	crosshair?: { x: number; y: number };
+	caption?: string;
+}
+
+/** Native-resolution crop with a screen-coordinate graticule; the only place fine guides belong. */
+export async function renderCrop(look: LookResponse, rect: CaptureRect, options: CropOptions = {}): Promise<Buffer> {
+	const capture = await decodeCapture(look);
+	const captureW = capture.bitmap.width;
+	const captureH = capture.bitmap.height;
+	const w = Math.max(1, Math.min(Math.round(rect.w), captureW));
+	const h = Math.max(1, Math.min(Math.round(rect.h), captureH));
+	const x = Math.max(0, Math.min(captureW - w, Math.round(rect.x)));
+	const y = Math.max(0, Math.min(captureH - h, Math.round(rect.y)));
+	const maxOutput = options.maxOutput ?? 1500;
+	const fit = maxOutput / Math.max(w, h);
+	const zoom = Math.max(0.1, Math.min(options.zoom ?? Math.min(3, Math.max(1, fit)), fit));
+	const crop = capture.clone().crop(x, y, w, h).scale(zoom);
+	const cropW = crop.bitmap.width;
+	const cropH = crop.bitmap.height;
+
+	const frame = look.window.framePoints;
+	const scaleX = captureW / Math.max(1, frame.w);
+	const scaleY = captureH / Math.max(1, frame.h);
+	const minor = await font8();
+	for (let step = 0; step <= w; step += 10) {
+		if ((x + step) % 50 !== 0) lineV(crop, 0, cropH, step * zoom, GRAY);
+	}
+	for (let step = 0; step <= h; step += 10) {
+		if ((y + step) % 50 !== 0) lineH(crop, 0, cropW, step * zoom, GRAY);
+	}
+	for (let step = 0; step <= w; step += 50) {
+		const px = step * zoom;
+		lineV(crop, 0, cropH, px, CYAN);
+		chipText(crop, minor, px + 2, 2, String(Math.round(frame.x + (x + step) / scaleX)), CYAN);
+	}
+	for (let step = 0; step <= h; step += 50) {
+		const py = step * zoom;
+		lineH(crop, 0, cropW, py, CYAN);
+		chipText(crop, minor, 2, py + 2, String(Math.round(frame.y + (y + step) / scaleY)), CYAN);
+	}
+	if (options.crosshair) {
+		const crossX = Math.round((options.crosshair.x - x) * zoom);
+		const crossY = Math.round((options.crosshair.y - y) * zoom);
+		if (crossX >= 0 && crossX < cropW && crossY >= 0 && crossY < cropH) {
+			lineH(crop, 0, cropW, crossY, RED);
+			lineV(crop, 0, cropH, crossX, RED);
+			circleStroke(crop, crossX, crossY, 14, RED);
+		}
+	}
+	if (options.caption) chipText(crop, minor, 2, Math.max(2, cropH - 14), options.caption, BLACK);
+	return await crop.getBufferAsync(Jimp.MIME_PNG);
 }
 
 export interface AimPreviewOptions extends OverviewOptions {
@@ -163,52 +241,27 @@ export async function renderAimPreview(look: LookResponse, snapshot: VisualSnaps
 	drawRulers(image, await font8(), frame.x, frame.y, frame.w, frame.h);
 	drawElements(image, await font16(), snapshot, scale);
 
-	const crossX = Math.round((aim.x + 0.5) * scale);
-	const crossY = Math.round((aim.y + 0.5) * scale);
 	const screenX = Math.round(frame.x + aim.x / scaleX);
 	const screenY = Math.round(frame.y + aim.y / scaleY);
+	const under = elementAt(snapshot, aim.x, aim.y)[0];
+	const caption = under
+		? `aim ${screenX},${screenY} -> ${under.ref} ${under.role}${under.name ? ` "${under.name}"` : ""}`
+		: `aim ${screenX},${screenY} -> no element`;
+	const crossX = Math.round((aim.x + 0.5) * scale);
+	const crossY = Math.round((aim.y + 0.5) * scale);
 	lineH(image, 40, image.bitmap.width, crossY, RED);
 	lineV(image, 14, image.bitmap.height, crossX, RED);
 	circleStroke(image, crossX, crossY, 16, RED);
-	const under = elementAt(snapshot, aim.x, aim.y)[0];
-	const caption = under
-		? `aim ${screenX},${screenY} -> e${under.id} ${under.role}${under.name ? ` "${under.name}"` : ""}`
-		: `aim ${screenX},${screenY} -> no element`;
 	chipText(image, await font8(), Math.max(41, crossX + 18), Math.max(15, crossY + 14), caption, RED);
 	const overview = await image.getBufferAsync(Jimp.MIME_PNG);
 
 	const [requestedW, requestedH] = options.cropSize ?? [320, 240];
-	const zoom = options.zoom ?? 2.5;
-	const cropW = Math.min(requestedW, captureW);
-	const cropH = Math.min(requestedH, captureH);
-	const cropX = Math.max(0, Math.min(captureW - cropW, Math.round(aim.x - cropW / 2)));
-	const cropY = Math.max(0, Math.min(captureH - cropH, Math.round(aim.y - cropH / 2)));
-	const crop = capture.clone().crop(cropX, cropY, cropW, cropH).scale(zoom);
-	const cropPixelW = crop.bitmap.width;
-	const cropPixelH = crop.bitmap.height;
-	const minor = await font8();
-	for (let step = 0; step <= cropW; step += 10) {
-		if ((cropX + step) % 50 !== 0) lineV(crop, 0, cropPixelH, step * zoom, GRAY);
-	}
-	for (let step = 0; step <= cropH; step += 10) {
-		if ((cropY + step) % 50 !== 0) lineH(crop, 0, cropPixelW, step * zoom, GRAY);
-	}
-	for (let step = 0; step <= cropW; step += 50) {
-		const x = step * zoom;
-		lineV(crop, 0, cropPixelH, x, CYAN);
-		chipText(crop, minor, x + 2, 2, String(Math.round(frame.x + (cropX + step) / scaleX)), CYAN);
-	}
-	for (let step = 0; step <= cropH; step += 50) {
-		const y = step * zoom;
-		lineH(crop, 0, cropPixelW, y, CYAN);
-		chipText(crop, minor, 2, y + 2, String(Math.round(frame.y + (cropY + step) / scaleY)), CYAN);
-	}
-	const centerX = Math.round((aim.x - cropX) * zoom);
-	const centerY = Math.round((aim.y - cropY) * zoom);
-	lineH(crop, 0, cropPixelW, centerY, RED);
-	lineV(crop, 0, cropPixelH, centerX, RED);
-	circleStroke(crop, centerX, centerY, 14, RED);
-	chipText(crop, minor, 2, Math.max(2, cropPixelH - 14), caption, BLACK);
+	const crop = await renderCrop(look, {
+		x: aim.x - requestedW / 2,
+		y: aim.y - requestedH / 2,
+		w: requestedW,
+		h: requestedH,
+	}, { zoom: options.zoom ?? 2.5, crosshair: aim, caption });
 
-	return { overview, crop: await crop.getBufferAsync(Jimp.MIME_PNG) };
+	return { overview, crop };
 }

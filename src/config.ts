@@ -5,6 +5,7 @@ import { getAgentDir } from "@earendil-works/pi-coding-agent";
 export interface ComputerUseConfig {
 	browser_use: boolean;
 	headless: boolean;
+	aim_preview: boolean;
 	managed_browser: "helium" | "chrome";
 }
 
@@ -24,6 +25,7 @@ export interface LoadedComputerUseConfig {
 const DEFAULT_CONFIG: ComputerUseConfig = {
 	browser_use: true,
 	headless: false,
+	aim_preview: true,
 	managed_browser: "chrome",
 };
 
@@ -46,8 +48,10 @@ function normalizePartial(raw: unknown): Partial<ComputerUseConfig> {
 	const out: Partial<ComputerUseConfig> = {};
 	const browserUse = parseBoolean((source as any).browser_use);
 	const headless = parseBoolean((source as any).headless);
+	const aimPreview = parseBoolean((source as any).aim_preview);
 	if (browserUse !== undefined) out.browser_use = browserUse;
 	if (headless !== undefined) out.headless = headless;
+	if (aimPreview !== undefined) out.aim_preview = aimPreview;
 	const managedBrowser = (source as any).managed_browser;
 	if (managedBrowser === "helium" || managedBrowser === "chrome") out.managed_browser = managedBrowser;
 	return out;
@@ -67,8 +71,10 @@ function readEnv(): Partial<ComputerUseConfig> {
 	const out: Partial<ComputerUseConfig> = {};
 	const browserUse = parseBoolean(process.env.PI_COMPUTER_USE_BROWSER_USE);
 	const headless = parseBoolean(process.env.PI_COMPUTER_USE_HEADLESS);
+	const aimPreview = parseBoolean(process.env.PI_COMPUTER_USE_AIM_PREVIEW);
 	if (browserUse !== undefined) out.browser_use = browserUse;
 	if (headless !== undefined) out.headless = headless;
+	if (aimPreview !== undefined) out.aim_preview = aimPreview;
 	const managedBrowser = process.env.PI_COMPUTER_USE_MANAGED_BROWSER;
 	if (managedBrowser === "helium" || managedBrowser === "chrome") out.managed_browser = managedBrowser;
 	return out;

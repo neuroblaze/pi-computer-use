@@ -1,0 +1,11 @@
+Use the browser tools to complete this task on the live web. Start from
+https://en.wikipedia.org.
+
+1. Use the site's search box to open the article "Ada Lovelace" (pick a search
+   suggestion if one appears).
+2. Note the city where she was born.
+3. From that article, follow the link to the programming language named after her.
+4. On the programming language's article, use the language menu to switch the
+   page to another language (for example Deutsch), and note the name of the
+   person credited as the language's designer.
+5. End your reply with a line: FINAL: <birth city>; <language>; <designer>

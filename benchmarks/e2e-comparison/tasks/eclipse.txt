@@ -1,0 +1,11 @@
+An Eclipse IDE window is already open on the desktop, using a fresh workspace.
+
+Create a new Java project named bench-app, and inside it a class named Main (in
+the default package) whose main method prints exactly:
+
+hello from bench
+
+Save all files so that the project and the source file exist on disk. Nothing
+else needs to be done in the IDE.
+
+When you are finished, reply briefly and end your reply with a line: FINAL: done

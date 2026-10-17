@@ -2,7 +2,7 @@ name: CI
 
 on:
   push:
-    branches: [main]
+    branches: [main, next]
   pull_request:
     branches: [main]
 
@@ -16,17 +16,16 @@ concurrency:
 jobs:
   test:
     name: Typecheck and tests
-    runs-on: macos-latest
+    runs-on: ubuntu-latest
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v7
+        uses: actions/checkout@v4
         with:
-          fetch-depth: 0
           persist-credentials: false
 
       - name: Setup Node.js
-        uses: actions/setup-node@v7
+        uses: actions/setup-node@v4
         with:
           node-version: 22
           cache: npm
@@ -35,15 +34,7 @@ jobs:
         run: npm ci --ignore-scripts --no-audit --no-fund
 
       - name: Run checks
-        run: npm test && npm run test:platform && npm run test:windows-scripts
-
-      - name: Build macOS helper
-        run: npm run build:native -- --platform darwin --arch arm64 --no-sign --output "$RUNNER_TEMP/bridge"
-
-      - name: Check commit messages
-        env:
-          GITHUB_BASE_SHA: ${{ github.event.pull_request.base.sha }}
-        run: npm run test:commits
+        run: npm test
 
   linux-native:
     name: Linux native (${{ matrix.arch }})
@@ -59,12 +50,12 @@ jobs:
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v7
+        uses: actions/checkout@v4
         with:
           persist-credentials: false
 
       - name: Setup Node.js
-        uses: actions/setup-node@v7
+        uses: actions/setup-node@v4
         with:
           node-version: 22
           cache: npm

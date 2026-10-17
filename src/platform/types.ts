@@ -2,7 +2,7 @@ import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 import type { LookResponse } from "../outline.ts";
 import type { PermissionStatus } from "../permissions.ts";
 
-export type PlatformName = "macos" | "windows" | "linux";
+export type PlatformName = "linux";
 export type NativeInputDelivery = "hid" | "pid";
 export type ActOutcome = "worked" | "didnt" | "unknown";
 /**
@@ -211,7 +211,6 @@ export interface ComputerUsePlatformBackend {
 	name: PlatformName;
 	/** Release process-local resources when the Pi session is torn down. */
 	shutdown?(): void | Promise<void>;
-	setActivity?(active: boolean): void | Promise<void>;
 	ensureReady(ctx: ExtensionContext, state: PlatformReadyState, signal?: AbortSignal): Promise<PlatformReadyState>;
 	listApps(signal?: AbortSignal): Promise<PlatformApp[]>;
 	listRoots(query: PlatformRootQuery, signal?: AbortSignal): Promise<PlatformRoot[]>;

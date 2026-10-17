@@ -330,10 +330,6 @@ function persistOperation(state: OperationState): void {
 	savedStates.saveDesktop(state, resourceKey, epoch);
 }
 
-export async function setComputerUseActivity(active: boolean): Promise<void> {
-	await currentPlatformBackend.setActivity?.(active);
-}
-
 /** Release handles and state owned by the current Pi session. */
 export async function shutdownComputerUseSession(): Promise<void> {
 	await resourceScheduler.close();
@@ -2109,44 +2105,21 @@ function managedBrowserExecutableCandidates(browser: "helium" | "chrome"): strin
 	const override = trimOrUndefined(process.env[overrideName]);
 	if (override) return [path.resolve(override)];
 
-	const platformCandidates = process.platform === "darwin"
-		? browser === "helium"
-			? [
-				"/Applications/Helium.app/Contents/MacOS/Helium",
-				path.join(os.homedir(), "Applications", "Helium.app", "Contents", "MacOS", "Helium"),
-			]
-			: [
-				"/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
-				path.join(os.homedir(), "Applications", "Google Chrome.app", "Contents", "MacOS", "Google Chrome"),
-			]
-		: process.platform === "win32"
-			? browser === "helium"
-				? [
-					process.env.LOCALAPPDATA && path.join(process.env.LOCALAPPDATA, "Helium", "Application", "helium.exe"),
-					process.env.PROGRAMFILES && path.join(process.env.PROGRAMFILES, "Helium", "Application", "helium.exe"),
-				]
-				: [
-					process.env.LOCALAPPDATA && path.join(process.env.LOCALAPPDATA, "Google", "Chrome", "Application", "chrome.exe"),
-					process.env.PROGRAMFILES && path.join(process.env.PROGRAMFILES, "Google", "Chrome", "Application", "chrome.exe"),
-					process.env["PROGRAMFILES(X86)"] && path.join(process.env["PROGRAMFILES(X86)"], "Google", "Chrome", "Application", "chrome.exe"),
-				]
-			: browser === "helium"
-				? [
-					"/usr/bin/helium",
-					"/usr/bin/helium-browser",
-					"/opt/helium/chrome",
-					path.join(os.homedir(), ".local", "helium", "chrome"),
-				]
-				: [
-					"/usr/bin/google-chrome",
-					"/usr/bin/google-chrome-stable",
-					"/usr/bin/chromium",
-					"/usr/bin/chromium-browser",
-					"/snap/bin/chromium",
-				];
-	const pathNames = browser === "helium"
-		? process.platform === "win32" ? ["helium.exe"] : ["helium", "helium-browser"]
-		: process.platform === "win32" ? ["chrome.exe"] : ["google-chrome", "google-chrome-stable", "chromium", "chromium-browser"];
+	const platformCandidates = browser === "helium"
+		? [
+			"/usr/bin/helium",
+			"/usr/bin/helium-browser",
+			"/opt/helium/chrome",
+			path.join(os.homedir(), ".local", "helium", "chrome"),
+		]
+		: [
+			"/usr/bin/google-chrome",
+			"/usr/bin/google-chrome-stable",
+			"/usr/bin/chromium",
+			"/usr/bin/chromium-browser",
+			"/snap/bin/chromium",
+		];
+	const pathNames = browser === "helium" ? ["helium", "helium-browser"] : ["google-chrome", "google-chrome-stable", "chromium", "chromium-browser"];
 	const pathCandidates = (process.env.PATH ?? "")
 		.split(path.delimiter)
 		.filter(Boolean)

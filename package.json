@@ -1,27 +1,27 @@
 {
-	"name": "@injaneity/pi-computer-use",
-	"version": "0.5.1",
-	"description": "Pi extension that lets AI agents observe and control macOS, Windows, and Linux apps.",
+	"name": "@neuroblaze/pi-computer-use",
+	"version": "0.6.0",
+	"description": "Linux/X11 fork of pi-computer-use: a Pi extension that lets AI agents observe and control desktop apps.",
 	"type": "module",
 	"keywords": [
 		"pi-package",
 		"pi-extension",
 		"pi",
 		"computer-use",
-		"macos",
 		"desktop-automation",
 		"accessibility",
-		"linux"
+		"linux",
+		"x11"
 	],
 	"license": "MIT",
 	"repository": {
 		"type": "git",
-		"url": "git+https://github.com/injaneity/pi-computer-use.git"
+		"url": "git+https://github.com/neuroblaze/pi-computer-use.git"
 	},
 	"bugs": {
-		"url": "https://github.com/injaneity/pi-computer-use/issues"
+		"url": "https://github.com/neuroblaze/pi-computer-use/issues"
 	},
-	"homepage": "https://github.com/injaneity/pi-computer-use#readme",
+	"homepage": "https://github.com/neuroblaze/pi-computer-use#readme",
 	"engines": {
 		"node": ">=20.6.0"
 	},
@@ -30,20 +30,11 @@
 		"src",
 		"scripts/build-native.mjs",
 		"scripts/setup-helper.mjs",
-		"native/macos/activity_glow.swift",
-		"native/macos/bridge.swift",
-		"native/windows/bridge-rs/Cargo.lock",
-		"native/windows/bridge-rs/Cargo.toml",
-		"native/windows/bridge-rs/src",
-		"native/windows/bridge-rs/tests",
-		"prebuilt/macos",
-		"prebuilt/windows",
-		"assets/reference/img.jpg",
-		"README.md",
-		"LICENSE",
 		"native/linux/bridge-rs",
 		"prebuilt/linux",
-		"docs/content/docs"
+		"assets/reference/img.jpg",
+		"README.md",
+		"LICENSE"
 	],
 	"pi": {
 		"extensions": [
@@ -53,30 +44,15 @@
 	},
 	"scripts": {
 		"postinstall": "node scripts/setup-helper.mjs --postinstall",
-		"docs:generate": "tsx scripts/docs-generators/generate-tool-reference.mjs && node scripts/docs-generators/generate-source-references.mjs",
-		"docs:check": "tsx scripts/docs-generators/generate-tool-reference.mjs --check && node scripts/docs-generators/generate-source-references.mjs --check && node scripts/check-docs.mjs",
-		"docs:dev": "npm --prefix docs run dev",
-		"docs:build": "npm --prefix docs run build",
-		"docs:site:check": "npm --prefix docs run typecheck && npm --prefix docs run build",
 		"typecheck": "tsc -p tsconfig.json",
 		"test:schema": "node scripts/check-tool-schemas.mjs",
 		"test:find-params": "tsx scripts/check-find-params.mjs",
-		"test:invariants": "node scripts/check-invariants.mjs",
 		"test:lifecycle": "tsx scripts/check-session-lifecycle.mjs",
 		"test:runtime": "tsx scripts/check-runtime-concurrency.mjs",
 		"test:output": "tsx scripts/check-bounded-output.mjs",
-		"test:commits": "node scripts/check-commit-messages.mjs",
-		"test:platform": "tsx scripts/check-platform-windows.mjs",
-		"test:windows-scripts": "node scripts/check-windows-build-scripts.mjs",
 		"test:package-assets": "node scripts/check-package-assets.mjs",
-		"test:signing": "node scripts/check-local-signing.mjs",
-		"test:macos-path": "node scripts/check-macos-helper-path.mjs",
-		"test:macos-target": "tsx scripts/check-macos-observe-target.mjs",
-		"test:macos-native": "node scripts/check-macos-native-pure.mjs",
 		"test:act-outcomes": "tsx scripts/check-act-outcomes.mjs",
-		"test": "npm run typecheck && npm run docs:check && npm run test:schema && npm run test:find-params && npm run test:output && npm run test:lifecycle && npm run test:runtime && npm run test:invariants && npm run test:platform && npm run test:linux && npm run test:linux-scripts && npm run test:signing && npm run test:macos-path && npm run test:macos-target && npm run test:macos-native && npm run test:act-outcomes",
-		"build:native": "node scripts/build-native.mjs",
-		"build:windows": "node scripts/build-native.mjs --platform windows",
+		"test": "npm run typecheck && npm run test:schema && npm run test:find-params && npm run test:output && npm run test:lifecycle && npm run test:runtime && npm run test:linux && npm run test:linux-scripts && npm run test:act-outcomes",
 		"build:linux": "node scripts/build-native.mjs --platform linux",
 		"test:linux": "tsx scripts/check-platform-linux.mjs",
 		"test:linux-scripts": "node scripts/check-linux-build-scripts.mjs",

@@ -1,81 +1,52 @@
-# pi-computer-use
+# @neuroblaze/pi-computer-use
 
-<p align="center">
-  <img src="./assets/logo/logo3.png" width="50%" alt="pi-computer-use">
-</p>
+A Linux/X11 fork of [pi-computer-use](https://github.com/injaneity/pi-computer-use) — a [Pi](https://pi.dev) extension that lets AI agents observe and control desktop apps.
 
-`pi-computer-use` lets AI agents use desktop apps on macOS, Windows, and Linux.
+This fork is in active redesign. The goal is a smaller, model-first interface for Linux desktops and headless X11 sessions (such as [smol-pi](https://github.com/neuroblaze/smol-pi)'s computer-use image): simplified observations, a single action surface, fewer protocol round-trips, and first-class visual grounding. Until the redesign lands, the extension behaves like upstream 0.5.x on Linux.
 
-The macOS helper requires macOS 14 or newer; the [macOS reference](./docs/content/docs/reference/platforms/macos/implementation.mdx) maps each platform claim to Apple documentation and the implementation.
+## Differences from upstream
 
-An agent can look at an app window, understand the buttons and text inside it, and perform actions like clicking, typing, scrolling, and waiting for something to change. This is useful when the agent needs to work with a normal desktop app instead of an API, a terminal command, or a file.
+- **Linux only.** macOS and Windows code, helpers, and release plumbing are removed.
+- **No npm release yet.** Load the checkout directly in Pi until the redesign stabilizes.
+- **Same helper path** as upstream (`~/.pi/agent/helpers/pi-computer-use/linux-bridge`). Don't install both extensions in the same Pi profile at once.
 
-New to computer use? Start with: [Wait, what exactly is Computer Use?](https://zanechee.dev/what-exactly-is-computer-use/)
-
-## What this package does
-
-This is a Pi extension. After installation, Pi agents get tools for:
-
-- finding open apps and windows
-- observing what is visible in a window
-- searching the visible interface for text, buttons, and controls
-- inspecting parts of the interface in more detail
-- clicking, typing, scrolling, and pressing UI controls
-- waiting for UI changes
-
-In short: it gives an agent a controlled way to operate desktop software.
-
-## What this package is not
-
-`pi-computer-use` is not a replacement for app APIs or MCP servers. If an app has a reliable direct integration, use that first.
-
-Computer use is most helpful when the only available interface is the app on screen.
-
-## Install
+## Development
 
 ```bash
-pi install npm:@injaneity/pi-computer-use
+npm install
+npm test
+
+# Build the Linux helper from source into prebuilt/linux/<arch>/linux-bridge
+npm run build:linux
+
+# Build and install the helper to ~/.pi/agent/helpers/pi-computer-use/linux-bridge
+PI_COMPUTER_USE_ALLOW_BUILD=1 npm run postinstall
+
+# Load this checkout in Pi
+pi --no-extensions -e .
 ```
 
-Start Pi and complete the platform setup flow.
+`npm test` includes the TypeScript checks and, on Linux, the platform and helper-script checks. Use Node 22+ (the repo's CI uses Node 22; Node 18 cannot load some dev dependencies). Native checks:
 
-On macOS, the runtime installs the helper per user at `~/Applications/pi-computer-use.app` and requests Accessibility and Screen Recording. Existing writable system-wide installs remain at `/Applications/pi-computer-use.app`. Enable both grants for that app in System Settings, then choose Recheck. The [macOS reference](./docs/content/docs/reference/platforms/macos/accessibility.mdx#trust-and-permission) documents the exact APIs and avoids relying on version-specific pane labels.
+```bash
+cd native/linux/bridge-rs
+cargo test --locked -j1
+cargo clippy --locked --all-targets -- -D warnings
+cargo fmt --all -- --check
+```
 
-On Windows, use an interactive desktop session. Windows support uses the platform accessibility APIs and does not use the macOS helper app.
+Inside a Pi session, `/computer-use` shows the active configuration and where it came from.
 
-On Linux, run Pi inside the target user's graphical session with a working AT-SPI2 accessibility bus. AT-SPI semantic operations remain background-first. X11 additionally supports EWMH window metadata/focus, window capture, and policy-gated XTEST physical input; strict headless/background policies never use focus or XTEST. Native Wayland remains semantic-only; diagnostics reads portal capability properties without creating a session, and interactive portal use is disabled. See [Linux support](./docs/content/docs/how-to-guides/linux.mdx) for the exact capability matrix and portal status.
+## Requirements
 
-Use `/computer-use` inside Pi to show the active configuration and where it came from.
+- Linux with an X11 session and a working AT-SPI2 accessibility bus (Xvfb is fine).
+- Node.js 20.6+ to run Pi.
+- A Rust toolchain only when building the helper from source.
 
-## Main tools
+## Upstream relationship
 
-- `find_roots`
-- `observe_ui`
-- `search_ui`
-- `expand_ui`
-- `inspect_ui`
-- `act_ui`
-- `read_text`
-- `wait_for`
-
-Follow the [getting-started tutorial](./docs/content/docs/tutorials/getting-started.mdx), then use the generated [agent state and action contract](./docs/content/docs/reference/agent/contract.mdx) for operating behavior or the generated [tool schema reference](./docs/content/docs/reference/agent/tools.mdx) for exact parameters.
-
-## Documentation
-
-The docs follow [Diátaxis](https://diataxis.fr/) and render through the Next.js/Fumadocs app in [`docs/`](./docs/README.md). Run `npm install --prefix docs` once, then `npm run docs:dev` and open `http://localhost:8080/docs`.
-
-- [Tutorials](./docs/content/docs/tutorials/getting-started.mdx)
-- [How-to guides](./docs/content/docs/how-to-guides/troubleshooting.mdx)
-- [Explanation](./docs/content/docs/explanation/architecture.mdx)
-- [Reference](./docs/content/docs/reference/index.mdx)
-- [macOS root targeting](./docs/content/docs/reference/platforms/macos/root-targeting.mdx)
-- [Linux support](./docs/content/docs/how-to-guides/linux.mdx)
-- [Contributing](./CONTRIBUTING.md)
-
-## Development status
-
-The architecture is centered on immutable, state-scoped observations. Desktop surfaces and CDP pages form one multi-root forest; progressive outline queries remain cached, while live work is ordered per physical resource so independent roots can run in parallel. `act_ui` accepts one or more intent steps, preserves focus across dependent input, verifies delivery, recovers safely, stores one complete successor state, and returns a compact diff when identity confidence allows. Older direct tools such as `screenshot`, `click`, `set_text`, and `computer_actions` are no longer part of the public extension surface.
+Forked from `injaneity/pi-computer-use` at upstream `main` (`67e9e2f`, 2026-10-16), MIT licensed. The Linux helper (`native/linux/bridge-rs`) and the TypeScript core are derived from that work; see [LICENSE](./LICENSE). The `upstream` git remote points at the original repository for reference and cherry-picks.
 
 ## License
 
-MIT
+MIT. Original work © 2026 Zane Chee and contributors; fork modifications © 2026 neuroblaze and contributors.

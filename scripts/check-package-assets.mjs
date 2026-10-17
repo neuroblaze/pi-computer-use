@@ -6,8 +6,6 @@ import { promisify } from "node:util";
 
 const execFileAsync = promisify(execFile);
 const expected = [
-	"package/prebuilt/macos/universal/pi-computer-use.app/Contents/MacOS/bridge",
-	"package/prebuilt/windows/windows-bridge.exe",
 	"package/prebuilt/linux/x64/linux-bridge",
 	"package/prebuilt/linux/arm64/linux-bridge",
 ];

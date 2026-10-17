@@ -99,12 +99,30 @@ assert.match(text(result), /^Acted\.\n\nControls \(1 of 2 nodes, stateId S3, roo
 assert.match(testing.waitForViewText(replaced, "S4", changesBetween(buttons, replaced)), /^Controls \(1 of 2 nodes, stateId S4, root @e1\):\n@e4 button "OK"\n/, "wait_for full views must be compact");
 assert.equal(testing.waitForViewText(buttons, "S5", changesBetween(buttons, buttons)), "(no element changes)\nUse stateId S5 for subsequent actions and queries.", "wait_for diff views are unchanged");
 
-const snapshot = { contextId: "ctx", snapshotId: "B1", targetId: "t", title: "Page", url: "about:blank", capturedAt: 0, text: "", targets: [], outline: serializeOutline(buttons) };
-const browserResult = (detail) => testing.runInOperation(() => testing.browserObservationResult(snapshot, "browser:ctx", 0, "observe_ui", undefined, detail));
-result = browserResult("outline");
+const snapshot = {
+	contextId: "ctx",
+	snapshotId: "B1",
+	targetId: "t",
+	title: "Page",
+	url: "about:blank",
+	capturedAt: 0,
+	text: "Alpha\n\nBeta",
+	targets: [],
+	outline: serializeOutline(buttons),
+	viewport: { width: 800, height: 600, scale: 1 },
+	scroll: { x: 0, y: 0 },
+	diagnostics: { cdp: "connected", targetCount: 0 },
+};
+const browserResult = (detail) => testing.runInOperation(async () => await testing.browserObservationResult(snapshot, "browser:ctx", 0, "observe_ui", undefined, detail));
+result = await browserResult("outline");
 assert.equal(text(result), `observe_ui completed for ${result.details.root.ref} "Page". State B1.\n${foldToBudget(buttons).text}`, "browser detail outline must keep the previous header-less fold");
-result = browserResult(undefined);
-assert.match(text(result), /State B1\.\nControls \(1 of 3 nodes, stateId B1, root @e1\):\n@e2 button "Save"\n/, "browser observations default to compact");
+result = await browserResult(undefined);
+const browserObservation = parseObservation(result);
+assert.equal(result.details.detail, "compact");
+assert.equal(browserObservation.state, "B1");
+assert.equal(browserObservation.url, "about:blank");
+assert.deepEqual(browserObservation.elements, [{ ref: "@e2", role: "button", name: "Save", rect: [0, 0, 20, 20] }]);
+assert.deepEqual(browserObservation.text, ["Alpha", "Beta"]);
 
 const twins = outlineOf(passiveNode("@e1", "Doc", "AXWindow", [passiveNode("@e2", "Left", "AXGroup", [uiNode("@e3", "Save")]), passiveNode("@e4", "Right", "AXGroup", [uiNode("@e5", "Save")]), uiNode("@e6", "Save as")]));
 const search = async (params, outline) => text(await testing.runInOperation(() => testing.performSearchUi(params), { currentOutline: outline, currentCapture: { stateId: "S6" } }));

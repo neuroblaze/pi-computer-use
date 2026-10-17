@@ -7,7 +7,7 @@
 // keeps the AX/CGEvent path, so with the env var unset this module is inert.
 
 import { randomUUID } from "node:crypto";
-import { parseLookResponse, serializeOutline, type SerializedOutline } from "./outline.ts";
+import { parseLookResponse, serializeOutline, type SerializedOutline, type SerializedOutlineNode } from "./outline.ts";
 
 export interface CdpConsoleEntry {
 	level: string;
@@ -29,6 +29,8 @@ export interface CdpSnapshotTarget {
 	value?: string;
 	actions: string[];
 	backendNodeId?: number;
+	/** Viewport CSS-pixel bounds when CDP could resolve them. */
+	rect?: { x: number; y: number; w: number; h: number };
 }
 
 export interface CdpPageSnapshot {
@@ -41,6 +43,12 @@ export interface CdpPageSnapshot {
 	text: string;
 	targets: CdpSnapshotTarget[];
 	outline: SerializedOutline;
+	/** Viewport metrics in CSS pixels (scale = devicePixelRatio). */
+	viewport: { width: number; height: number; scale: number };
+	/** Scroll offsets at snapshot time; used to invalidate aim previews. */
+	scroll: { x: number; y: number };
+	/** Present when the caller requested a screenshot. */
+	image?: { base64: string; mimeType: string; width: number; height: number };
 	diagnostics: {
 		cdp: "connected";
 		targetCount: number;
@@ -136,6 +144,55 @@ export class CdpTab {
 		return Array.isArray(result?.nodes) ? result.nodes : [];
 	}
 
+	/** Page text plus viewport and scroll metrics in one round trip. */
+	async pageContent(): Promise<{ text: string; scrollX: number; scrollY: number; width: number; height: number; dpr: number }> {
+		const value = await this.evaluate(`(() => {
+			const body = document.body;
+			return {
+				text: body ? body.innerText : "",
+				scrollX: window.scrollX,
+				scrollY: window.scrollY,
+				width: window.innerWidth,
+				height: window.innerHeight,
+				dpr: window.devicePixelRatio || 1,
+			};
+		})()`);
+		const record = value && typeof value === "object" ? value as Record<string, unknown> : {};
+		const number = (candidate: unknown, fallback: number) => Number.isFinite(candidate) ? Number(candidate) : fallback;
+		return {
+			text: typeof record.text === "string" ? record.text : "",
+			scrollX: number(record.scrollX, 0),
+			scrollY: number(record.scrollY, 0),
+			width: Math.max(1, number(record.width, 1)),
+			height: Math.max(1, number(record.height, 1)),
+			dpr: Math.max(0.1, number(record.dpr, 1)),
+		};
+	}
+
+	/** Captures a viewport-sized region as a PNG at CSS-pixel scale. */
+	async captureScreenshot(clip: { x: number; y: number; w: number; h: number }): Promise<{ base64: string; mimeType: string; width: number; height: number } | undefined> {
+		const result = await this.send("Page.captureScreenshot", {
+			format: "png",
+			clip: { x: clip.x, y: clip.y, width: clip.w, height: clip.h, scale: 1 },
+		});
+		const base64 = result?.data;
+		if (typeof base64 !== "string" || !base64) return undefined;
+		const buffer = Buffer.from(base64, "base64");
+		const width = buffer.length >= 24 ? buffer.readUInt32BE(16) : 0;
+		const height = buffer.length >= 24 ? buffer.readUInt32BE(20) : 0;
+		if (!width || !height) return undefined;
+		return { base64, mimeType: "image/png", width, height };
+	}
+
+	/** Viewport bounds of a DOM node, resolved by backend node id. */
+	async elementRect(backendNodeId: number): Promise<{ x: number; y: number; w: number; h: number } | undefined> {
+		const value = await this.withBackendNode(backendNodeId, "function(){ const r = this.getBoundingClientRect(); return [r.x, r.y, r.width, r.height]; }");
+		if (!Array.isArray(value) || value.length < 4) return undefined;
+		const [x, y, w, h] = value.map((entry) => Number(entry));
+		if (!Number.isFinite(x) || !Number.isFinite(y) || !Number.isFinite(w) || !Number.isFinite(h)) return undefined;
+		return { x: Math.round(x), y: Math.round(y), w: Math.round(w), h: Math.round(h) };
+	}
+
 	async navigate(url: string): Promise<void> {
 		const loaded = new Promise<void>((resolve) => {
 			this.loadFired = resolve;
@@ -190,15 +247,17 @@ export class CdpTab {
 		await this.mouseAt(end.x, end.y, "mouseReleased");
 	}
 
-	private async withBackendNode(backendNodeId: number, functionDeclaration: string, args: unknown[] = []): Promise<void> {
+	private async withBackendNode(backendNodeId: number, functionDeclaration: string, args: unknown[] = []): Promise<unknown> {
 		const resolved = await this.send("DOM.resolveNode", { backendNodeId });
 		const objectId = resolved?.object?.objectId;
 		if (typeof objectId !== "string") throw new Error(`CDP could not resolve backend node ${backendNodeId}.`);
-		await this.send("Runtime.callFunctionOn", {
+		const result = await this.send("Runtime.callFunctionOn", {
 			objectId,
 			functionDeclaration,
+			returnByValue: true,
 			arguments: args.map((value) => ({ value })),
 		});
+		return result?.result?.value;
 	}
 
 	/** Screen bounds of the browser window containing this tab. */
@@ -437,18 +496,70 @@ export async function cdpEvaluateForContext(contextId: string, expression: strin
 	}
 }
 
-export async function cdpSnapshotForContext(contextId: string): Promise<CdpPageSnapshot | undefined> {
+export async function cdpScreenshotForContext(contextId: string, clip: { x: number; y: number; w: number; h: number }): Promise<{ base64: string; mimeType: string; width: number; height: number } | undefined> {
+	const result = await withCdpContextTab(contextId, async (tab) => await tab.captureScreenshot(clip));
+	return result ?? undefined;
+}
+
+/** Scroll offsets and URL at claim time, for invalidating stale aim previews. */
+export async function cdpPageStateForContext(contextId: string): Promise<{ scrollX: number; scrollY: number; url: string } | undefined> {
+	return await withCdpContextTab(contextId, async (tab) => {
+		const value = await tab.evaluate("({ scrollX: window.scrollX, scrollY: window.scrollY, url: location.href })");
+		const record = value && typeof value === "object" ? value as Record<string, unknown> : {};
+		return {
+			scrollX: Number.isFinite(record.scrollX) ? Number(record.scrollX) : 0,
+			scrollY: Number.isFinite(record.scrollY) ? Number(record.scrollY) : 0,
+			url: typeof record.url === "string" ? record.url : "",
+		};
+	});
+}
+
+export type CdpImagePolicy = "never" | "always" | "auto";
+
+/** Target nodes whose viewport rects are resolved; bounds CDP round trips per snapshot. */
+const MAX_TARGET_RECTS = 120;
+
+/**
+ * Resolves viewport bounds for each actionable target via getBoundingClientRect
+ * and mirrors them onto the matching outline nodes.
+ */
+async function attachTargetRects(tab: CdpTab, targets: CdpSnapshotTarget[], outline: SerializedOutline): Promise<void> {
+	const nodesByRef = new Map<string, SerializedOutlineNode>();
+	const walk = (node: SerializedOutlineNode): void => {
+		nodesByRef.set(node.ref, node);
+		for (const child of node.children ?? []) walk(child);
+	};
+	if (outline?.root) walk(outline.root);
+	const pending = targets.filter((target) => target.backendNodeId !== undefined).slice(0, MAX_TARGET_RECTS);
+	await Promise.allSettled(pending.map(async (target) => {
+		const rect = await tab.elementRect(target.backendNodeId!);
+		if (!rect) return;
+		target.rect = rect;
+		const node = nodesByRef.get(target.ref);
+		if (node) node.rect = rect;
+	}));
+}
+
+export async function cdpSnapshotForContext(contextId: string, options: { image?: CdpImagePolicy } = {}): Promise<CdpPageSnapshot | undefined> {
 	const page = await cdpPageForContext(contextId);
 	if (!page?.webSocketDebuggerUrl) return undefined;
 
 	const tab = await CdpTab.connect(page.webSocketDebuggerUrl, page.id, page.title);
 	try {
-		const [textValue, nodes] = await Promise.all([
-			tab.evaluate("document.body ? document.body.innerText : ''").catch(() => ""),
+		const [content, nodes] = await Promise.all([
+			tab.pageContent().catch(() => undefined),
 			tab.accessibilityTree().catch(() => []),
 		]);
 		const snapshotId = randomUUID();
 		const { targets, outline } = cdpSnapshotOutline(snapshotId, nodes);
+		await attachTargetRects(tab, targets, outline).catch(() => {});
+		const viewport = { width: content?.width ?? 1, height: content?.height ?? 1, scale: content?.dpr ?? 1 };
+		const scroll = { x: content?.scrollX ?? 0, y: content?.scrollY ?? 0 };
+		const policy = options.image ?? "never";
+		const wantsImage = policy === "always" || (policy === "auto" && targets.length < 3);
+		const image = wantsImage
+			? await tab.captureScreenshot({ x: scroll.x, y: scroll.y, w: viewport.width, h: viewport.height }).catch(() => undefined)
+			: undefined;
 		return {
 			contextId,
 			snapshotId,
@@ -456,9 +567,12 @@ export async function cdpSnapshotForContext(contextId: string): Promise<CdpPageS
 			title: page.title,
 			url: page.url ?? "",
 			capturedAt: Date.now(),
-			text: typeof textValue === "string" ? textValue : String(textValue ?? ""),
+			text: content?.text ?? "",
 			targets,
 			outline,
+			viewport,
+			scroll,
+			image,
 			diagnostics: { cdp: "connected", targetCount: targets.length },
 		};
 	} finally {
@@ -503,7 +617,7 @@ function axString(raw: any): string {
 	return typeof value === "string" ? value.trim() : "";
 }
 
-function cdpSnapshotOutline(snapshotId: string, nodes: unknown[]): { targets: CdpSnapshotTarget[]; outline: SerializedOutline } {
+export function cdpSnapshotOutline(snapshotId: string, nodes: unknown[]): { targets: CdpSnapshotTarget[]; outline: SerializedOutline } {
 	const records = new Map<string, any>();
 	for (const raw of nodes as any[]) {
 		const nodeId = String(raw?.nodeId ?? "");
@@ -516,11 +630,19 @@ function cdpSnapshotOutline(snapshotId: string, nodes: unknown[]): { targets: Cd
 		seen.add(nodeId);
 		const role = axString(raw?.role);
 		const name = axString(raw?.name);
-		const actions = browserActionsForAxRole(role);
+		const properties: any[] = Array.isArray(raw?.properties) ? raw.properties : [];
+		const editable = properties.some((property) => axString(property?.name) === "editable" && property?.value?.value === true);
+		const roleActions = browserActionsForAxRole(role);
+		const actions = editable && !roleActions.includes("set_text")
+			? [...new Set([...roleActions, "click", "set_text"])]
+			: roleActions;
 		const backendNodeId = Number.isFinite(raw?.backendDOMNodeId) ? Math.trunc(raw.backendDOMNodeId) : undefined;
 		const wireRef = `cdp:${nodeId}`;
-		if (actions.length > 0 && name && (!actions.includes("click") || backendNodeId)) {
-			targets.push({ ref: wireRef, source: "browser_ax", role, name, value: axString(raw?.value) || undefined, actions, backendNodeId });
+		const value = axString(raw?.value);
+		const refActionable = actions.includes("click") || actions.includes("set_text");
+		const identified = Boolean(name) || (actions.includes("set_text") && Boolean(value));
+		if (actions.length > 0 && identified && (!refActionable || backendNodeId !== undefined)) {
+			targets.push({ ref: wireRef, source: "browser_ax", role, name, value: value || undefined, actions, backendNodeId });
 		}
 		const childIds: string[] = Array.isArray(raw?.childIds) ? raw.childIds.map(String) : [];
 		return {
@@ -578,8 +700,8 @@ function cdpSnapshotOutline(snapshotId: string, nodes: unknown[]): { targets: Cd
 
 function browserActionsForAxRole(role: string): string[] {
 	const normalized = role.toLowerCase();
-	if (["button", "link", "checkbox", "radio", "menuitem", "tab"].includes(normalized)) return ["click"];
-	if (["textbox", "searchbox", "combobox"].includes(normalized)) return ["click", "set_text"];
+	if (["button", "link", "checkbox", "radio", "radiobutton", "menuitem", "tab", "togglebutton", "switch", "disclosuretriangle", "menulistoption"].includes(normalized)) return ["click"];
+	if (["textbox", "searchbox", "combobox", "textfield", "searchfield", "comboboxselect", "comboboxmenubutton"].includes(normalized)) return ["click", "set_text"];
 	if (["listbox", "slider", "spinbutton"].includes(normalized)) return ["click"];
 	return [];
 }

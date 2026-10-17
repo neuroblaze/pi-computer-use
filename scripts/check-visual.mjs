@@ -1,10 +1,12 @@
 #!/usr/bin/env node
 import assert from "node:assert/strict";
 import Jimp from "jimp";
-import { parseLookResponse } from "../src/outline.ts";
+import { parseLookResponse, serializeOutline } from "../src/outline.ts";
+import { cdpSnapshotOutline } from "../src/cdp.ts";
 import { formatObservation } from "../src/visual/format.ts";
-import { renderAimPreview, renderCrop, renderOverview } from "../src/visual/overlays.ts";
-import { badgeLabel, buildVisualSnapshot, describeClusters, elementAt } from "../src/visual/snapshot.ts";
+import { buildBrowserSnapshot, browserCaptureSource } from "../src/visual/browser.ts";
+import { captureSourceFromLook, renderAimPreview, renderCrop, renderOverview } from "../src/visual/overlays.ts";
+import { badgeLabel, buildVisualSnapshot, describeClusters, elementAt, textBlocksFromPage } from "../src/visual/snapshot.ts";
 
 const png = await new Jimp(400, 300, 0xffffffff).getBufferAsync(Jimp.MIME_PNG);
 const raw = {
@@ -76,7 +78,9 @@ assert.equal(truncatedSnapshot.truncated.text, true);
 const truncatedObservation = JSON.parse(formatObservation(truncatedSnapshot, { stateId: "s2" }));
 assert.equal(truncatedObservation.textTruncated, true);
 
-const overview = await renderOverview(look, snapshot, { maxEdge: 1536 });
+const source = captureSourceFromLook(look);
+assert.ok(source, "the desktop look must provide a capture source");
+const overview = await renderOverview(source, snapshot, { maxEdge: 1536 });
 const rendered = await Jimp.read(overview);
 assert.equal(rendered.bitmap.width, 400);
 assert.equal(rendered.bitmap.height, 300);
@@ -87,15 +91,82 @@ rendered.scan(0, 0, rendered.bitmap.width, rendered.bitmap.height, (_x, _y, idx)
 });
 assert.ok(orange > 100, `expected orange element outlines in the render, found ${orange}px`);
 
-const preview = await renderAimPreview(look, snapshot, { x: 30, y: 30 }, { maxEdge: 1536 });
+const preview = await renderAimPreview(source, snapshot, { x: 30, y: 30 }, { maxEdge: 1536 });
 const crop = await Jimp.read(preview.crop);
 assert.equal(crop.bitmap.width, 320 * 2.5);
 assert.equal(crop.bitmap.height, 240 * 2.5);
 const previewOverview = await Jimp.read(preview.overview);
 assert.equal(previewOverview.bitmap.width, 400);
 
-const zoomed = await Jimp.read(await renderCrop(look, { x: 40, y: 40, w: 200, h: 100 }, { zoom: 2 }));
+const zoomed = await Jimp.read(await renderCrop(source, { x: 40, y: 40, w: 200, h: 100 }, { zoom: 2 }));
 assert.equal(zoomed.bitmap.width, 400);
 assert.equal(zoomed.bitmap.height, 200);
+
+assert.deepEqual(textBlocksFromPage("A\n\nB\n\nB\n\nC"), ["A", "B", "C"]);
+
+const axTransform = cdpSnapshotOutline("snap-1", [
+	{ nodeId: "1", role: { value: "RootWebArea" }, name: { value: "Page" }, childIds: ["2", "3"] },
+	{ nodeId: "2", parentId: "1", role: { value: "textField" }, name: { value: "" }, value: { value: "seed" }, backendDOMNodeId: 42, properties: [{ name: "editable", value: { type: "boolean", value: true } }] },
+	{ nodeId: "3", parentId: "1", role: { value: "toggleButton" }, name: { value: "Mute" }, backendDOMNodeId: 43 },
+]);
+assert.equal(axTransform.targets.length, 2, "editable and toggle targets must be actionable");
+const axField = axTransform.targets.find((target) => target.role === "textField");
+assert.ok(axField?.actions.includes("set_text"), "editable AX nodes must accept set_text");
+assert.equal(axField?.backendNodeId, 42);
+assert.equal(axField?.value, "seed", "unnamed inputs are identified by value");
+assert.ok(axTransform.targets.find((target) => target.role === "toggleButton")?.actions.includes("click"));
+assert.equal(axTransform.outline.root.ref, "@e1", "AX nodes become @e refs in tree order");
+
+const browserOutline = {
+	ref: "cdp:1",
+	role: "document",
+	title: "Demo Page",
+	children: [
+		{ ref: "cdp:2", role: "button", title: "Go", actions: ["click"], rect: { x: 40, y: 40, w: 80, h: 30 } },
+		{ ref: "cdp:3", role: "textbox", title: "Search", actions: ["click", "set_text"], isTextInput: true, rect: { x: 40, y: 90, w: 200, h: 30 } },
+	],
+};
+const browserParsed = parseLookResponse({
+	lookId: "browser",
+	window: { windowId: 0, framePoints: { x: 0, y: 0, w: 800, h: 600 }, scaleFactor: 1 },
+	outline: browserOutline,
+	timings: {},
+});
+const browser = {
+	contextId: "browser:ctx",
+	snapshotId: "B1",
+	targetId: "t",
+	title: "Demo Page",
+	url: "https://example.test/",
+	capturedAt: 0,
+	text: "First paragraph.\n\nSecond paragraph.",
+	targets: [],
+	outline: serializeOutline(browserParsed.parsedOutline),
+	viewport: { width: 800, height: 600, scale: 1 },
+	scroll: { x: 0, y: 0 },
+	image: { base64: png.toString("base64"), mimeType: "image/png", width: 400, height: 300 },
+	diagnostics: { cdp: "connected", targetCount: 2 },
+};
+const browserSnapshot = buildBrowserSnapshot(browser, { app: "Browser" });
+assert.equal(browserSnapshot.window.url, "https://example.test/");
+assert.equal(browserSnapshot.window.app, "Browser");
+assert.deepEqual(browserSnapshot.text, ["First paragraph.", "Second paragraph."]);
+assert.equal(browserSnapshot.elements.length, 2);
+assert.equal(browserSnapshot.elements[0].role, "button");
+assert.equal(browserSnapshot.elements[0].name, "Go");
+assert.deepEqual(browserSnapshot.elements[0].rect, [20, 20, 40, 15], "viewport rects scale into capture pixels");
+assert.equal(browserSnapshot.clusters.length, 1, "dense browser controls cluster into one marker");
+const browserObservation = JSON.parse(formatObservation(browserSnapshot, { stateId: "B1" }));
+assert.equal(browserObservation.url, "https://example.test/");
+assert.deepEqual(browserObservation.elements[0].rect, [20, 20, 40, 15]);
+
+const browserSource = browserCaptureSource(browser);
+assert.ok(browserSource, "the browser snapshot with an image must provide a capture source");
+const browserOverview = await Jimp.read(await renderOverview(browserSource, browserSnapshot, { maxEdge: 400 }));
+assert.equal(browserOverview.bitmap.width, 400);
+assert.equal(browserOverview.bitmap.height, 300);
+const browserCrop = await Jimp.read(await renderCrop(browserSource, { x: 16, y: 16, w: 48, h: 24 }, { zoom: 3 }));
+assert.equal(browserCrop.bitmap.width, 144);
+assert.equal(browserCrop.bitmap.height, 72);
 
 console.log("Visual snapshot, cluster, format, and overlay checks passed");

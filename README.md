@@ -2,11 +2,11 @@
 
 A Linux/X11 fork of [pi-computer-use](https://github.com/injaneity/pi-computer-use) — a [Pi](https://pi.dev) extension that lets AI agents observe and control desktop apps.
 
-This fork is in active redesign. The goal is a smaller, model-first interface for Linux desktops and headless X11 sessions (such as [smol-pi](https://github.com/neuroblaze/smol-pi)'s computer-use image): simplified observations, a single action surface, fewer protocol round-trips, and first-class visual grounding. Until the redesign lands, the extension behaves like upstream 0.5.x on Linux.
+This fork is in active redesign. The goal is a smaller, model-first interface for Linux desktops and headless X11 sessions (such as [smol-pi](https://github.com/neuroblaze/smol-pi)'s computer-use image): simplified observations, a single action surface, fewer protocol round-trips, and first-class visual grounding. The v2 layer is already live for `observe_ui` / `act_ui` / `zoom_ui` on both desktop windows and browser pages; the remaining upstream-era tools are being folded in.
 
 ## Design
 
-The v2 model-facing contract — compact JSON snapshot, annotated screenshots, and an aim → verify → commit loop for pixel clicks — lives in [`docs/redesign.md`](./docs/redesign.md), together with the DeepSeek V4.1 Flash vision baseline. The snapshot builder and overlays are in [`src/visual`](./src/visual); [`scripts/spike/visual-loop.ts`](./scripts/spike/visual-loop.ts) runs them against a live window.
+The v2 model-facing contract — compact JSON snapshot, annotated screenshots, and an aim → verify → commit loop for pixel clicks — lives in [`docs/redesign.md`](./docs/redesign.md), together with the DeepSeek V4.1 Flash vision baseline. The snapshot builder and overlays are in [`src/visual`](./src/visual) (desktop looks and CDP browser pages share the pipeline); [`scripts/spike/visual-loop.ts`](./scripts/spike/visual-loop.ts) runs them against a live window.
 
 ## Differences from upstream
 

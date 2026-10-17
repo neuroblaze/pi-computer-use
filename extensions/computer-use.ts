@@ -71,7 +71,7 @@ const observeTool = defineTool({
 	description: "Capture the current/frontmost root or one exact @r root and return a JSON observation (elements with refs, clusters, visible text) plus stateId.",
 	promptSnippet: "Primary UI observation tool. Follow with zoom_ui, search_ui, expand_ui, inspect_ui, or act_ui.",
 	promptGuidelines: [
-		"Use mode=semantic to skip OCR and images, visual to force them, and fused for automatic selection.",
+		"Use mode=semantic to skip OCR and images, visual to force them, and fused for automatic selection; browser pages attach a viewport screenshot under the same modes.",
 		"Elements carry state-scoped refs; clusters C1… group controls whose badges would overlap, and their member refs stay clickable.",
 		"Use @e outline refs from observe_ui/search_ui for act_ui; pictureOnly refs are coordinate-only and blocked by UI-tree-only policy.",
 		"Use search_ui for unlisted controls; expand_ui on the root ref or detail=outline for structure.",
@@ -124,6 +124,7 @@ const actTool = defineTool({
 	promptGuidelines: [
 		"After clicking an editable region, omit ref from typeText/keypress so input follows the established focus.",
 		"Coordinate clicks preview by default: act_ui returns a crosshair image and arms the point; confirm with { action: \"commit\" } or pass confirm: true to dispatch without a preview.",
+		"Browser pages use the same aim/commit previews in viewport CSS pixels; ref clicks stay DOM-level and never need geometry.",
 	],
 	parameters: Type.Object({ stateId, expect: Type.Optional(Type.Object(conditionProperties)), actions: Type.Array(uiAction, { minItems: 1, maxItems: 20 }) }),
 	execute: executeAct,
@@ -150,7 +151,7 @@ const waitForTool = defineTool({
 const zoomTool = defineTool({
 	name: "zoom_ui",
 	label: "Zoom UI",
-	description: "Native-resolution crop of an element ref or region, with screen-coordinate graticule labels.",
+	description: "Native-resolution crop of an element ref or region, with graticule labels in screen coordinates (desktop) or viewport pixels (browser pages).",
 	promptSnippet: "Use zoom_ui to read small text or check pixels; it costs far fewer tokens than a full-size screenshot.",
 	parameters: Type.Object({
 		stateId,

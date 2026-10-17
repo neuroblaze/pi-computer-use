@@ -84,9 +84,29 @@ function badge(img: Img, font: LoadedFont, cx: number, cy: number, label: string
 	img.print(font, Math.round(cx - width / 2), Math.round(cy - height / 2), label, 10000);
 }
 
-async function decodeCapture(look: LookResponse): Promise<Img> {
-	if (!look.image?.jpegBase64) throw new Error("The observation has no capture image to annotate.");
-	return await Jimp.read(Buffer.from(look.image.jpegBase64, "base64"));
+/**
+ * The capture a renderer draws on: an image plus the coordinate space the
+ * model acts in (screen points for windows, viewport CSS pixels for pages).
+ */
+export interface CaptureSource {
+	origin: [number, number];
+	size: [number, number];
+	image: { base64: string; mimeType?: string; width: number; height: number };
+}
+
+export function captureSourceFromLook(look: LookResponse): CaptureSource | undefined {
+	if (!look.image?.jpegBase64) return undefined;
+	const frame = look.window.framePoints;
+	return {
+		origin: [frame.x, frame.y],
+		size: [frame.w, frame.h],
+		image: { base64: look.image.jpegBase64, mimeType: look.image.mimeType, width: look.image.width, height: look.image.height },
+	};
+}
+
+async function decodeCapture(source: CaptureSource): Promise<Img> {
+	if (!source.image.base64) throw new Error("The observation has no capture image to annotate.");
+	return await Jimp.read(Buffer.from(source.image.base64, "base64"));
 }
 
 function scaleCapture(capture: Img, maxEdge = DEFAULT_MAX_EDGE): { scale: number; image: Img } {
@@ -94,16 +114,23 @@ function scaleCapture(capture: Img, maxEdge = DEFAULT_MAX_EDGE): { scale: number
 	return { scale, image: capture.clone().scale(scale) };
 }
 
-function drawRulers(img: Img, font: LoadedFont, originX: number, originY: number, frameW: number, frameH: number): void {
+function captureScales(source: CaptureSource): { scaleX: number; scaleY: number } {
+	return {
+		scaleX: source.image.width / Math.max(1, source.size[0]),
+		scaleY: source.image.height / Math.max(1, source.size[1]),
+	};
+}
+
+function drawRulers(img: Img, font: LoadedFont, originX: number, originY: number, sizeW: number, sizeH: number): void {
 	const width = img.bitmap.width;
 	const height = img.bitmap.height;
 	fillRect(img, 0, 0, width, 14, BLACK);
 	fillRect(img, 0, 0, 40, height, BLACK);
 	for (let i = 0; i <= 10; i += 1) {
 		const x = Math.round((i / 10) * (width - 41)) + 40;
-		chipText(img, font, Math.min(x, width - 34), 2, String(Math.round(originX + (i / 10) * frameW)));
+		chipText(img, font, Math.min(x, width - 34), 2, String(Math.round(originX + (i / 10) * sizeW)));
 		const y = Math.round((i / 10) * (height - 15)) + 14;
-		if (y + 12 < height) chipText(img, font, 2, Math.min(y, height - 14), String(Math.round(originY + (i / 10) * frameH)));
+		if (y + 12 < height) chipText(img, font, 2, Math.min(y, height - 14), String(Math.round(originY + (i / 10) * sizeH)));
 	}
 }
 
@@ -113,6 +140,7 @@ function drawElements(img: Img, font: LoadedFont, snapshot: VisualSnapshot, scal
 		for (const ref of cluster.refs) clustered.add(ref);
 	}
 	for (const element of snapshot.elements) {
+		if (!element.rect) continue;
 		const [x, y, w, h] = element.rect.map((value) => value * scale) as [number, number, number, number];
 		strokeRect(img, x, y, Math.max(w, 2), Math.max(h, 2), 4, BLACK);
 		strokeRect(img, x, y, Math.max(w, 2), Math.max(h, 2), 2, ORANGE);
@@ -130,11 +158,12 @@ export interface OverviewOptions {
 	maxEdge?: number;
 }
 
-export async function renderOverview(look: LookResponse, snapshot: VisualSnapshot, options: OverviewOptions = {}): Promise<Buffer> {
-	const capture = await decodeCapture(look);
+export async function renderOverview(source: CaptureSource, snapshot: VisualSnapshot, options: OverviewOptions = {}): Promise<Buffer> {
+	const capture = await decodeCapture(source);
 	const { scale, image } = scaleCapture(capture, options.maxEdge);
-	const frame = look.window.framePoints;
-	drawRulers(image, await font8(), frame.x, frame.y, frame.w, frame.h);
+	const [originX, originY] = source.origin;
+	const [sizeW, sizeH] = source.size;
+	drawRulers(image, await font8(), originX, originY, sizeW, sizeH);
 	drawElements(image, await font16(), snapshot, scale);
 	return await image.getBufferAsync(Jimp.MIME_PNG);
 }
@@ -146,16 +175,13 @@ export interface CaptureRect {
 	h: number;
 }
 
-/** Maps an AT-SPI (screen-space) rect into capture-relative pixels. */
-export function screenRectToCapture(look: LookResponse, rect: OutlineRect): CaptureRect {
-	const frame = look.window.framePoints;
-	const captureW = Math.max(1, look.image?.width ?? Math.round(frame.w));
-	const captureH = Math.max(1, look.image?.height ?? Math.round(frame.h));
-	const scaleX = captureW / Math.max(1, frame.w);
-	const scaleY = captureH / Math.max(1, frame.h);
+/** Maps a rect in the source's action coordinates into capture pixels. */
+export function rectToCapture(source: CaptureSource, rect: OutlineRect): CaptureRect {
+	const [originX, originY] = source.origin;
+	const { scaleX, scaleY } = captureScales(source);
 	return {
-		x: Math.round((rect.x - frame.x) * scaleX),
-		y: Math.round((rect.y - frame.y) * scaleY),
+		x: Math.round((rect.x - originX) * scaleX),
+		y: Math.round((rect.y - originY) * scaleY),
 		w: Math.round(rect.w * scaleX),
 		h: Math.round(rect.h * scaleY),
 	};
@@ -168,9 +194,9 @@ export interface CropOptions {
 	caption?: string;
 }
 
-/** Native-resolution crop with a screen-coordinate graticule; the only place fine guides belong. */
-export async function renderCrop(look: LookResponse, rect: CaptureRect, options: CropOptions = {}): Promise<Buffer> {
-	const capture = await decodeCapture(look);
+/** Native-resolution crop with an action-coordinate graticule; the only place fine guides belong. */
+export async function renderCrop(source: CaptureSource, rect: CaptureRect, options: CropOptions = {}): Promise<Buffer> {
+	const capture = await decodeCapture(source);
 	const captureW = capture.bitmap.width;
 	const captureH = capture.bitmap.height;
 	const w = Math.max(1, Math.min(Math.round(rect.w), captureW));
@@ -184,9 +210,8 @@ export async function renderCrop(look: LookResponse, rect: CaptureRect, options:
 	const cropW = crop.bitmap.width;
 	const cropH = crop.bitmap.height;
 
-	const frame = look.window.framePoints;
-	const scaleX = captureW / Math.max(1, frame.w);
-	const scaleY = captureH / Math.max(1, frame.h);
+	const [originX, originY] = source.origin;
+	const { scaleX, scaleY } = captureScales(source);
 	const minor = await font8();
 	for (let step = 0; step <= w; step += 10) {
 		if ((x + step) % 50 !== 0) lineV(crop, 0, cropH, step * zoom, GRAY);
@@ -197,12 +222,12 @@ export async function renderCrop(look: LookResponse, rect: CaptureRect, options:
 	for (let step = 0; step <= w; step += 50) {
 		const px = step * zoom;
 		lineV(crop, 0, cropH, px, CYAN);
-		chipText(crop, minor, px + 2, 2, String(Math.round(frame.x + (x + step) / scaleX)), CYAN);
+		chipText(crop, minor, px + 2, 2, String(Math.round(originX + (x + step) / scaleX)), CYAN);
 	}
 	for (let step = 0; step <= h; step += 50) {
 		const py = step * zoom;
 		lineH(crop, 0, cropW, py, CYAN);
-		chipText(crop, minor, 2, py + 2, String(Math.round(frame.y + (y + step) / scaleY)), CYAN);
+		chipText(crop, minor, 2, py + 2, String(Math.round(originY + (y + step) / scaleY)), CYAN);
 	}
 	if (options.crosshair) {
 		const crossX = Math.round((options.crosshair.x - x) * zoom);
@@ -228,21 +253,23 @@ export interface AimPreview {
 	crop: Buffer;
 }
 
-/** Renders the aim -> verify preview: annotated overview plus a graticule crop. Nothing is dispatched. */
-export async function renderAimPreview(look: LookResponse, snapshot: VisualSnapshot, aim: { x: number; y: number }, options: AimPreviewOptions = {}): Promise<AimPreview> {
-	const capture = await decodeCapture(look);
-	const captureW = capture.bitmap.width;
-	const captureH = capture.bitmap.height;
-	const frame = look.window.framePoints;
-	const scaleX = captureW / Math.max(1, frame.w);
-	const scaleY = captureH / Math.max(1, frame.h);
+/**
+ * Renders the aim -> verify preview: annotated overview plus a graticule crop.
+ * Nothing is dispatched. The aim point must be in capture pixels (the same
+ * space as snapshot element rects); captions convert it back to action
+ * coordinates (screen points or viewport pixels) for the model.
+ */
+export async function renderAimPreview(source: CaptureSource, snapshot: VisualSnapshot, aim: { x: number; y: number }, options: AimPreviewOptions = {}): Promise<AimPreview> {
+	const capture = await decodeCapture(source);
+	const [originX, originY] = source.origin;
+	const { scaleX, scaleY } = captureScales(source);
 	const { scale, image } = scaleCapture(capture, options.maxEdge);
 
-	drawRulers(image, await font8(), frame.x, frame.y, frame.w, frame.h);
+	drawRulers(image, await font8(), originX, originY, source.size[0], source.size[1]);
 	drawElements(image, await font16(), snapshot, scale);
 
-	const screenX = Math.round(frame.x + aim.x / scaleX);
-	const screenY = Math.round(frame.y + aim.y / scaleY);
+	const screenX = Math.round(originX + aim.x / scaleX);
+	const screenY = Math.round(originY + aim.y / scaleY);
 	const under = elementAt(snapshot, aim.x, aim.y)[0];
 	const caption = under
 		? `aim ${screenX},${screenY} -> ${under.ref} ${under.role}${under.name ? ` "${under.name}"` : ""}`
@@ -256,7 +283,7 @@ export async function renderAimPreview(look: LookResponse, snapshot: VisualSnaps
 	const overview = await image.getBufferAsync(Jimp.MIME_PNG);
 
 	const [requestedW, requestedH] = options.cropSize ?? [320, 240];
-	const crop = await renderCrop(look, {
+	const crop = await renderCrop(source, {
 		x: aim.x - requestedW / 2,
 		y: aim.y - requestedH / 2,
 		w: requestedW,

@@ -7,7 +7,7 @@ import { buildSnapshot, type SnapshotOptions, type VisualSnapshot } from "./snap
 export function browserCaptureSource(browser: CdpPageSnapshot): CaptureSource | undefined {
 	if (!browser.image) return undefined;
 	return {
-		origin: [0, 0],
+		screenOrigin: [0, 0],
 		size: [browser.viewport.width, browser.viewport.height],
 		image: {
 			base64: browser.image.base64,
@@ -24,7 +24,7 @@ export function buildBrowserSnapshot(browser: CdpPageSnapshot, options: Snapshot
 		app: options.app ?? "Browser",
 		title: browser.title,
 		url: browser.url,
-		origin: [0, 0],
+		screenOrigin: [0, 0],
 		size: [browser.viewport.width, browser.viewport.height],
 		capture: browser.image ? { width: browser.image.width, height: browser.image.height } : undefined,
 		text: browser.text,

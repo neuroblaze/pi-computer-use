@@ -16,7 +16,7 @@ const raw = {
 	outline: {
 		role: "frame",
 		title: "Demo Window",
-		rect: { x: 10, y: 10, w: 400, h: 300 },
+		rect: { x: 0, y: 0, w: 400, h: 300 },
 		actions: ["press"],
 		children: [
 			{
@@ -24,13 +24,13 @@ const raw = {
 				rect: { x: 10, y: 10, w: 400, h: 300 },
 				actions: ["press"],
 				children: [
-					{ role: "push button", title: "Back", rect: { x: 30, y: 30, w: 20, h: 20 }, actions: ["press"] },
-					{ role: "push button", title: "Forward", rect: { x: 44, y: 30, w: 20, h: 20 }, actions: ["press"] },
-					{ role: "push button", title: "Reload", rect: { x: 58, y: 30, w: 20, h: 20 }, actions: ["press"] },
-					{ role: "push button", title: "Minimize", rect: { x: 30, y: -20, w: 20, h: 20 }, actions: ["press"] },
-					{ role: "entry", isTextInput: true, focused: true, value: "hello", rect: { x: 120, y: 100, w: 160, h: 24 } },
-					{ role: "static", value: "Hello \uFFFC world", rect: { x: 40, y: 150, w: 200, h: 20 } },
-					{ role: "static", value: "Demo Window", rect: { x: 40, y: 260, w: 200, h: 20 } },
+					{ role: "push button", title: "Back", rect: { x: 20, y: 20, w: 20, h: 20 }, actions: ["press"] },
+					{ role: "push button", title: "Forward", rect: { x: 34, y: 20, w: 20, h: 20 }, actions: ["press"] },
+					{ role: "push button", title: "Reload", rect: { x: 48, y: 20, w: 20, h: 20 }, actions: ["press"] },
+					{ role: "push button", title: "Minimize", rect: { x: 20, y: -30, w: 20, h: 20 }, actions: ["press"] },
+					{ role: "entry", isTextInput: true, focused: true, value: "hello", rect: { x: 110, y: 90, w: 160, h: 24 } },
+					{ role: "static", value: "Hello \uFFFC world", rect: { x: 30, y: 140, w: 200, h: 20 } },
+					{ role: "static", value: "Demo Window", rect: { x: 30, y: 250, w: 200, h: 20 } },
 				],
 			},
 		],

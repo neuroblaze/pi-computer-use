@@ -28,9 +28,9 @@ Rules:
 - **Always report outcomes.** Every act returns a compact change report (`changed`, `focused`, `appeared`, `removed`). `changed: false` is a signal, not a success.
 - **Text-only models still work**, minus the visual modality. The extension reads the active model's input modalities (`ctx.model.input`, `"text" | "image"`), omits images, and adds a one-line advisory that a vision-capable model is strongly recommended for computer use, with the agent offering to switch.
 
-**Wired now (2026-10-17):** observation JSON in `observe_ui` compact views (desktop and browser); per-cluster listing; annotated overviews wherever images are attached; `zoom_ui`; coordinate-click aim preview (`aim_preview`, default on) with `commit` and `confirm: true`; the modality advisory; browser pages via CDP: v2 observations, viewport screenshots, rects from `getBoundingClientRect`, zoom and aim previews in viewport pixels.
+**Wired now (2026-10-17):** observation JSON in `observe_ui` compact views (desktop and browser); per-cluster listing; annotated overviews wherever images are attached; `zoom_ui`; coordinate-click aim preview (`aim_preview`, default on) with `commit` and `confirm: true`; post-click hit reports; the modality advisory; browser pages via CDP: v2 observations, viewport screenshots, rects from `getBoundingClientRect`, zoom and aim previews in viewport pixels; helper-side geometry normalization (window-relative rects with screen/window coordinate calibration and a GTK `GetExtents` window-space fallback).
 
-**Still upstream for now:** refs/state epochs (no auto-refresh on stale state), outline-based `search_ui`/`expand_ui`/`inspect_ui`, and post-click hit reports.
+**Still upstream for now:** refs/state epochs (no auto-refresh on stale state) and outline-based `search_ui`/`expand_ui`/`inspect_ui`.
 
 ## Snapshot (JSON)
 
@@ -64,6 +64,12 @@ Rules:
 
 ## Visual contract
 
+### Geometry normalization
+
+- The helper emits **window-relative** rects (0, 0 = capture origin) so model geometry and the captured image share one space; the renderer never subtracts a window origin from node rects.
+- AT-SPI coordinate spaces differ by toolkit: Chromium answers `GetExtents(0)` in screen coordinates, some GTK stacks answer in window coordinates (and report `0, 0` positions when the toplevel origin is unavailable). The helper calibrates on the root node's own extents and falls back to `GetExtents(1)` (window space) for nodes whose screen position looks unavailable.
+- GTK dialogs that used to list no elements at all (zenity) now expose buttons and text fields with usable rects.
+
 ### Overview rendering
 
 - The helper capture is already scaled (900 px in fused mode, 1600 px in visual mode); overlays are drawn at capture scale, after any scaling, so they stay crisp.
@@ -93,7 +99,9 @@ Rules:
 - `act_ui {actions:[{aim:{x,y}}]}` renders a preview: overview with crosshair **plus** a native crop centered on the point, and reports the element under it. Nothing is dispatched; the result arms the point.
 - `act_ui {actions:[{commit}]}` dispatches the armed click once; any new look (a new observation or a completed action) expires it.
 - **Preview is on by default.** A lone coordinate click previews automatically; `confirm: true` on the click dispatches immediately. Disable entirely with `aim_preview: false`. Text-only models skip previews (they cannot see them) and dispatch directly.
-- Still pending: post-click hit reports (element under the point + `changed: false` signals) and anchor clicks (`{click: {id, anchor: …}}`) for sliders and drag tracks.
+- Every coordinate action now carries a **hit report** after dispatch: the element under the point *before → after*, for up to three clicks/moves/drags, on desktop windows and browser pages alike. Aim previews report the same "under the point" before anything is dispatched, so a failed click is never silent.
+- Coordinate actions need XTEST: under `headless` the transaction batches with the `ax_only` policy, physical delivery is impossible, and the hit report says so instead of failing silently.
+- Still pending: anchor clicks (`{click: {id, anchor: …}}`) for sliders and drag tracks.
 
 ## Baseline: DeepSeek V4.1 Flash
 
@@ -118,9 +126,9 @@ Caveats: single 8-card run; isolated high-contrast targets; measured through thi
 - `zoom_ui` renders a native-resolution crop of a ref or region on both paths.
 - The modality advisory appears when `ctx.model.input` lacks `"image"`.
 
-Checks: `scripts/check-visual.mjs` (unit) and `scripts/check-visual-live.mjs` (`PI_CU_LIVE=1`; Xvfb + Chromium) drives observation → zoom → aim → commit on the desktop path and again over CDP for a browser page. `scripts/spike/visual-loop.ts` remains the standalone renderer demo.
+Checks: `scripts/check-visual.mjs` (unit) and `scripts/check-visual-live.mjs` (`PI_CU_LIVE=1`; Xvfb + Chromium) drives observation → zoom → aim → commit → hit report → confirm bypass → text-only advisory on the desktop path and again over CDP for a browser page, with page-side echo/counter assertions proving where the pixels landed. `scripts/spike/visual-loop.ts` remains the standalone renderer demo. The Rust helper normalizes rects to window-relative space (unit-tested for screen-space, window-space, and per-node recovered coordinates).
 
-Known gaps: post-click hit reports; Chromium reports some chrome controls with duplicated or degenerate rects near the window origin (e.g. "Tab search" twice, once at `y = -4`), which surface as corner clusters; and GTK apps under the computer-use image report degenerate `(0, 0)` extents through AT-SPI (zenity), so their observations can list no elements. Both need a helper-side geometry pass.
+Known gaps: anchor clicks for sliders and drag tracks; GTK window coordinates can start a few pixels off the client origin (zenity reports −5, −5), so GTK outlines can sit a few pixels off — visible in the crops and harmless for pointing; frame-less AT-SPI roots (no X11 window) still fall back to a 1×1 capture with no geometry.
 
 ## Decisions (2026-10-16)
 

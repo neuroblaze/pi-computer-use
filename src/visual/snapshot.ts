@@ -52,14 +52,17 @@ export interface VisualSnapshot {
 
 /**
  * Platform-neutral observation source. Desktop looks and browser pages both
- * reduce to this: a coordinate space (origin + size), an optional capture in
- * pixels, and outline nodes whose rects live in that coordinate space.
+ * reduce to this: a coordinate space for the capture (origin + size), an
+ * optional capture in pixels, and outline nodes whose rects are already
+ * relative to the capture origin (window-relative for desktop looks,
+ * viewport-relative for pages).
  */
 export interface VisualSource {
 	app: string;
 	title: string;
 	url?: string;
-	origin: [number, number];
+	/** Where the capture sits on the physical screen; used for coordinate labels only. */
+	screenOrigin: [number, number];
 	size: [number, number];
 	capture?: { width: number; height: number };
 	/** Raw page text; when present it replaces node-derived text blocks (browser pages). */
@@ -136,7 +139,7 @@ export function capTextBlocks(blocks: string[], options: SnapshotOptions = {}): 
 }
 
 export function buildSnapshot(source: VisualSource, options: SnapshotOptions = {}): VisualSnapshot {
-	const [originX, originY] = source.origin;
+	const [originX, originY] = source.screenOrigin;
 	const [sizeW, sizeH] = source.size;
 	const captureW = Math.max(1, Math.round(source.capture?.width ?? sizeW));
 	const captureH = Math.max(1, Math.round(source.capture?.height ?? sizeH));
@@ -145,10 +148,12 @@ export function buildSnapshot(source: VisualSource, options: SnapshotOptions = {
 	const renderScale = Math.min(1, (options.maxEdge ?? DEFAULT_MAX_EDGE) / Math.max(captureW, captureH));
 	const frameArea = Math.max(1, sizeW * sizeH);
 
+	// Node rects are already relative to the capture origin, so they only need
+	// scaling; the screen origin matters for labels, not for geometry.
 	const visibleRect = (node: OutlineNode): [number, number, number, number] | undefined => {
 		if (!node.rect) return undefined;
-		const x = (node.rect.x - originX) * scaleX;
-		const y = (node.rect.y - originY) * scaleY;
+		const x = node.rect.x * scaleX;
+		const y = node.rect.y * scaleY;
 		const w = node.rect.w * scaleX;
 		const h = node.rect.h * scaleY;
 		if (x + w <= 0 || y + h <= 0 || x >= captureW || y >= captureH) return undefined;
@@ -262,13 +267,13 @@ export function buildSnapshot(source: VisualSource, options: SnapshotOptions = {
 	};
 }
 
-/** Desktop adapter: AT-SPI look responses map screen-space rects through the window frame. */
+/** Desktop adapter: AT-SPI look responses map window-relative node rects through the capture scale. */
 export function buildVisualSnapshot(look: LookResponse, options: SnapshotOptions & { app?: string } = {}): VisualSnapshot {
 	const frame = look.window.framePoints;
 	return buildSnapshot({
 		app: options.app ?? "",
 		title: look.outline.title,
-		origin: [frame.x, frame.y],
+		screenOrigin: [frame.x, frame.y],
 		size: [frame.w, frame.h],
 		capture: look.image ? { width: look.image.width, height: look.image.height } : undefined,
 		nodes: look.parsedOutline?.nodes ?? [],

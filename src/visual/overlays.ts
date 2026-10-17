@@ -86,10 +86,12 @@ function badge(img: Img, font: LoadedFont, cx: number, cy: number, label: string
 
 /**
  * The capture a renderer draws on: an image plus the coordinate space the
- * model acts in (screen points for windows, viewport CSS pixels for pages).
+ * model reads (screen points for windows, viewport CSS pixels for pages).
+ * Node and element rects passed to these renderers are already relative to
+ * the capture origin; `screenOrigin` is only used for coordinate labels.
  */
 export interface CaptureSource {
-	origin: [number, number];
+	screenOrigin: [number, number];
 	size: [number, number];
 	image: { base64: string; mimeType?: string; width: number; height: number };
 }
@@ -98,7 +100,7 @@ export function captureSourceFromLook(look: LookResponse): CaptureSource | undef
 	if (!look.image?.jpegBase64) return undefined;
 	const frame = look.window.framePoints;
 	return {
-		origin: [frame.x, frame.y],
+		screenOrigin: [frame.x, frame.y],
 		size: [frame.w, frame.h],
 		image: { base64: look.image.jpegBase64, mimeType: look.image.mimeType, width: look.image.width, height: look.image.height },
 	};
@@ -161,7 +163,7 @@ export interface OverviewOptions {
 export async function renderOverview(source: CaptureSource, snapshot: VisualSnapshot, options: OverviewOptions = {}): Promise<Buffer> {
 	const capture = await decodeCapture(source);
 	const { scale, image } = scaleCapture(capture, options.maxEdge);
-	const [originX, originY] = source.origin;
+	const [originX, originY] = source.screenOrigin;
 	const [sizeW, sizeH] = source.size;
 	drawRulers(image, await font8(), originX, originY, sizeW, sizeH);
 	drawElements(image, await font16(), snapshot, scale);
@@ -175,13 +177,12 @@ export interface CaptureRect {
 	h: number;
 }
 
-/** Maps a rect in the source's action coordinates into capture pixels. */
+/** Scales a rect that is already relative to the capture origin into capture pixels. */
 export function rectToCapture(source: CaptureSource, rect: OutlineRect): CaptureRect {
-	const [originX, originY] = source.origin;
 	const { scaleX, scaleY } = captureScales(source);
 	return {
-		x: Math.round((rect.x - originX) * scaleX),
-		y: Math.round((rect.y - originY) * scaleY),
+		x: Math.round(rect.x * scaleX),
+		y: Math.round(rect.y * scaleY),
 		w: Math.round(rect.w * scaleX),
 		h: Math.round(rect.h * scaleY),
 	};
@@ -210,7 +211,7 @@ export async function renderCrop(source: CaptureSource, rect: CaptureRect, optio
 	const cropW = crop.bitmap.width;
 	const cropH = crop.bitmap.height;
 
-	const [originX, originY] = source.origin;
+	const [originX, originY] = source.screenOrigin;
 	const { scaleX, scaleY } = captureScales(source);
 	const minor = await font8();
 	for (let step = 0; step <= w; step += 10) {
@@ -261,7 +262,7 @@ export interface AimPreview {
  */
 export async function renderAimPreview(source: CaptureSource, snapshot: VisualSnapshot, aim: { x: number; y: number }, options: AimPreviewOptions = {}): Promise<AimPreview> {
 	const capture = await decodeCapture(source);
-	const [originX, originY] = source.origin;
+	const [originX, originY] = source.screenOrigin;
 	const { scaleX, scaleY } = captureScales(source);
 	const { scale, image } = scaleCapture(capture, options.maxEdge);
 

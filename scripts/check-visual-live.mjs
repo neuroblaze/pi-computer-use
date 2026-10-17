@@ -96,7 +96,8 @@ async function runInsideSession() {
 			"--disable-dev-shm-usage",
 			"--force-renderer-accessibility",
 			"--user-data-dir=" + chromeProfileDir,
-			"--window-size=1024,768",
+			"--window-position=320,140",
+			"--window-size=900,620",
 			pageUrl,
 		], env));
 		const root = await waitForRoot(tool, executeFind, (candidate) => /visual live/i.test(candidate.windowTitle), 30_000);
@@ -112,6 +113,8 @@ async function runInsideSession() {
 		assert(json.elements.every((element) => /^@e\d+$/.test(element.ref)), "elements must carry @e refs");
 		const entry = json.elements.find((element) => element.role === "entry" || element.value !== undefined) ?? json.elements[0];
 		assert(entry?.ref, "observation had no actionable ref");
+		const button = json.elements.find((element) => element.name === "Zeta Button" && element.rect);
+		assert(button?.rect, `desktop observation must list the page button: ${JSON.stringify(json.elements.map((element) => element.name))}`);
 		assert.equal(images(observation).length, 1, "visual mode should attach one annotated overview");
 		console.log(`PASS desktop v2 observation: ${json.elements.length} elements, ${json.text.length} text blocks (${stateId})`);
 
@@ -120,31 +123,49 @@ async function runInsideSession() {
 		assert.match(text(zoomed), /Elements in view:/);
 		console.log(`PASS desktop zoom_ui ${entry.ref}`);
 
-		const point = { x: entry.rect[0] + Math.floor(entry.rect[2] / 2), y: entry.rect[1] + Math.floor(entry.rect[3] / 2) };
+		const point = { x: button.rect[0] + Math.floor(button.rect[2] / 2), y: button.rect[1] + Math.floor(button.rect[3] / 2) };
 		const preview = await tool(executeAct, { stateId, actions: [{ action: "aim", x: point.x, y: point.y }] });
 		assert.match(text(preview), /Aim preview/);
 		assert.match(text(preview), /Nothing was dispatched/);
+		assert.match(text(preview), /@e\d+ button "Zeta Button"/, `the aim preview must report the button under the point: ${text(preview)}`);
 		assert.equal(images(preview).length, 2, "aim preview should return the crosshair overview and the crop");
 		console.log(`PASS desktop aim preview at (${point.x},${point.y}) — nothing dispatched`);
 
+		// Foreground delivery: coordinate clicks need XTEST, which the ax_only
+		// headless policy forbids.
+		process.env.PI_COMPUTER_USE_HEADLESS = "0";
 		const committed = await tool(executeAct, { stateId, actions: [{ action: "commit" }] });
 		assert.match(text(committed), /Executed 1 checked UI action/);
+		assert.match(text(committed), /Hit report: click \(\d+,\d+\): @e\d+ button "Zeta Button" → @e\d+ button "Zeta Button"\./, `the commit must report the hit: ${text(committed)}`);
+		assertForegroundX11(committed.details?.execution);
 		const committedState = committed.details?.capture?.stateId;
 		assert(committedState, "commit returned no successor state");
-		console.log(`PASS desktop commit dispatched the armed click (${committedState})`);
+		console.log(`PASS desktop commit dispatched the armed click with a hit report (${committedState})`);
+
+		const landed = await tool(executeObserve, { root: root.windowRef, mode: "semantic" });
+		const landedJson = JSON.parse(parseJsonBody(text(landed)));
+		assert(landedJson.text.some((block) => block.includes("clicked 1")), `the desktop coordinate click never reached the page: ${JSON.stringify(landedJson.text)}`);
+		console.log("PASS desktop coordinate click landed on the page (offset window, click counter incremented)");
 
 		const refreshed = await tool(executeObserve, { root: root.windowRef, mode: "visual" });
 		const refreshedState = refreshed.details?.capture?.stateId;
 		assert(refreshedState, "refreshed observation returned no stateId");
 		const refreshedJson = JSON.parse(parseJsonBody(text(refreshed)));
-		const refreshedTarget = refreshedJson.elements.find((element) => element.rect && element.name) ?? refreshedJson.elements[0];
+		const refreshedButton = refreshedJson.elements.find((element) => element.name === "Zeta Button" && element.rect);
+		assert(refreshedButton?.rect, "refreshed observation must still list the page button");
 		const directPoint = {
-			x: refreshedTarget.rect[0] + Math.floor(refreshedTarget.rect[2] / 2),
-			y: refreshedTarget.rect[1] + Math.floor(refreshedTarget.rect[3] / 2),
+			x: refreshedButton.rect[0] + Math.floor(refreshedButton.rect[2] / 2),
+			y: refreshedButton.rect[1] + Math.floor(refreshedButton.rect[3] / 2),
 		};
 		const direct = await tool(executeAct, { stateId: refreshedState, actions: [{ action: "click", x: directPoint.x, y: directPoint.y, confirm: true }] });
 		assert.match(text(direct), /Executed 1 checked UI action/);
-		console.log("PASS desktop confirm:true dispatched without a preview");
+		assert.match(text(direct), /Hit report: click \(\d+,\d+\): @e\d+ button "Zeta Button" → /, "preview-free coordinate clicks still report their hit");
+		assertForegroundX11(direct.details?.execution);
+		process.env.PI_COMPUTER_USE_HEADLESS = "1";
+		const clickedTwice = await tool(executeObserve, { root: root.windowRef, mode: "semantic" });
+		const clickedTwiceJson = JSON.parse(parseJsonBody(text(clickedTwice)));
+		assert(clickedTwiceJson.text.some((block) => block.includes("clicked 2")), `the preview-free click never reached the page: ${JSON.stringify(clickedTwiceJson.text)}`);
+		console.log("PASS desktop confirm:true dispatched without a preview and landed");
 
 		const textOnly = await tool(executeObserve, { root: root.windowRef, mode: "visual" }, textOnlyCtx);
 		assert.match(text(textOnly), /vision-capable model is strongly recommended/);
@@ -201,9 +222,10 @@ async function runInsideSession() {
 
 		const browserCommitted = await tool(executeAct, { stateId: refreshedBrowserState, actions: [{ action: "commit" }] });
 		assert.match(text(browserCommitted), /act_ui completed for/);
+		assert.match(text(browserCommitted), /Hit report: click \(\d+,\d+\): @e\d+ button "Zeta Button" → @e\d+ button "Zeta Button"\./, `the browser commit must report the hit: ${text(browserCommitted)}`);
 		const browserCommittedState = browserCommitted.details?.stateId;
 		assert(browserCommittedState && browserCommittedState !== refreshedBrowserState, "browser commit must advance the state");
-		console.log(`PASS browser commit dispatched the armed click (${browserCommittedState})`);
+		console.log(`PASS browser commit dispatched the armed click with a hit report (${browserCommittedState})`);
 
 		const afterClick = await tool(executeObserve, { root: browserRoot, mode: "semantic" });
 		const afterJson = JSON.parse(parseJsonBody(text(afterClick)));
@@ -220,6 +242,14 @@ async function runInsideSession() {
 		await delay(500);
 		await fs.rm(tempDir, { recursive: true, force: true }).catch(() => {});
 	}
+}
+
+function assertForegroundX11(execution) {
+	assert(["unknown", "worked"].includes(execution?.outcome), `unexpected foreground outcome ${execution?.outcome}`);
+	const step = execution?.steps?.[0] ?? execution;
+	assert.equal(step?.deliveryPolicy, "foreground");
+	assert.equal(step?.performed?.delivery, "hid");
+	assert.equal(step?.performed?.grounding, "coordinates");
 }
 
 function parseJsonBody(body) {

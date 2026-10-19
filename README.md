@@ -11,8 +11,24 @@ The v2 model-facing contract — compact JSON snapshot, annotated screenshots, a
 ## Differences from upstream
 
 - **Linux only.** macOS and Windows code, helpers, and release plumbing are removed.
-- **No npm release yet.** Load the checkout directly in Pi until the redesign stabilizes.
+- **GitHub release (no npm yet).** Install from a tag: `pi install git:github.com/neuroblaze/pi-computer-use@v0.6.0`. The Linux x64 helper ships prebuilt; ARM builds it on demand.
 - **Same helper path** as upstream (`~/.pi/agent/helpers/pi-computer-use/linux-bridge`). Don't install both extensions in the same Pi profile at once.
+
+## Install
+
+```bash
+# The upstream npm package registers the same tool names; remove it first.
+pi remove npm:@injaneity/pi-computer-use
+pi install git:github.com/neuroblaze/pi-computer-use@v0.6.0
+```
+
+The Linux x64 helper is shipped prebuilt inside the package and installed to
+`~/.pi/agent/helpers/pi-computer-use/linux-bridge` — no Rust toolchain needed.
+ARM64 builds the helper on demand (`PI_COMPUTER_USE_ALLOW_BUILD=1`, requires
+Rust).
+
+Inside smol-pi, Pi runs as root against a host-owned `~/.pi`, so git refuses the
+checkout; run `git config --global --add safe.directory '*'` in the VM first.
 
 ## Development
 

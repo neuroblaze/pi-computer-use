@@ -1,0 +1,10 @@
+{
+	"packages": ["npm:pi-ollama-cloud"],
+	"theme": "dark",
+	"compaction": {
+		"enabled": true
+	},
+	"defaultProvider": "ollama-cloud",
+	"defaultModel": "deepseek-v4.1-flash",
+	"defaultThinkingLevel": "high"
+}

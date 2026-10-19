@@ -1,0 +1,14 @@
+A LibreOffice Calc spreadsheet application is already open on the desktop with
+an empty document.
+
+Type this small report into the sheet:
+
+  Region | Revenue
+  North  | 1200
+  South  | 800
+  Total  | <a formula that sums the two revenue cells>
+
+Save the document as /root/calc-report.csv. When LibreOffice asks about the
+file format, choose the CSV format and confirm.
+
+When you are finished, reply briefly and end your reply with a line: FINAL: done

@@ -869,7 +869,7 @@ fn capability(message: impl Into<String>) -> ProtocolError {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use linux_bridge::atspi::AccessibleRef;
+    use linux_bridge::atspi::{AccessibleRef, BoundsSpace};
     use std::collections::HashSet;
 
     fn node() -> NodeSnapshot {
@@ -886,6 +886,7 @@ mod tests {
             value: String::new(),
             interfaces: HashSet::new(),
             bounds: None,
+            bounds_space: BoundsSpace::default(),
             is_secure: false,
             depth: 0,
         }

@@ -38,6 +38,16 @@ pub struct Rect {
     pub height: i32,
 }
 
+/// Coordinate space AT-SPI reported extents in before normalization.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum BoundsSpace {
+    /// Screen coordinates (Chromium and most AT-SPI stacks).
+    #[default]
+    Screen,
+    /// Window coordinates, already relative to the toplevel origin (some GTK stacks).
+    Window,
+}
+
 #[derive(Debug, Clone)]
 pub struct RootSnapshot {
     pub accessible: AccessibleRef,
@@ -63,6 +73,7 @@ pub struct NodeSnapshot {
     pub value: String,
     pub interfaces: HashSet<String>,
     pub bounds: Option<Rect>,
+    pub bounds_space: BoundsSpace,
     pub is_secure: bool,
     pub depth: usize,
 }
@@ -80,6 +91,7 @@ impl NodeSnapshot {
             value: String::new(),
             interfaces: HashSet::new(),
             bounds: None,
+            bounds_space: BoundsSpace::default(),
             is_secure: false,
             depth: 0,
         }
@@ -172,16 +184,31 @@ impl AtspiClient {
         }
     }
 
-    async fn bounds(&self, accessible: &AccessibleRef) -> Option<Rect> {
+    async fn extents(&self, accessible: &AccessibleRef, coord_type: u32) -> Option<Rect> {
         let proxy = self.proxy(accessible, COMPONENT).await.ok()?;
         let (x, y, width, height): (i32, i32, i32, i32) =
-            proxy.call("GetExtents", &(0u32)).await.ok()?;
+            proxy.call("GetExtents", &(coord_type)).await.ok()?;
         (width > 0 && height > 0).then_some(Rect {
             x,
             y,
             width,
             height,
         })
+    }
+
+    /// AT-SPI extents, normalized so callers can tell which coordinate space
+    /// they are in. Some GTK stacks answer screen coordinates with a (0, 0)
+    /// position for every widget; fall back to window coordinates there.
+    async fn node_bounds(&self, accessible: &AccessibleRef) -> Option<(Rect, BoundsSpace)> {
+        let screen = self.extents(accessible, 0).await?;
+        if screen.x == 0 && screen.y == 0 {
+            if let Some(window) = self.extents(accessible, 1).await {
+                if window.x != 0 || window.y != 0 {
+                    return Some((window, BoundsSpace::Window));
+                }
+            }
+        }
+        Some((screen, BoundsSpace::Screen))
     }
 
     async fn application_pid(&self, accessible: &AccessibleRef) -> u64 {
@@ -226,7 +253,7 @@ impl AtspiClient {
                 let role = self.role(&window).await;
                 let name = self.string_property(&window, "Name").await;
                 roots.push(RootSnapshot {
-                    frame: self.bounds(&window).await,
+                    frame: self.extents(&window, 0).await,
                     accessible: window,
                     pid,
                     name: if name.is_empty() {
@@ -284,9 +311,14 @@ impl AtspiClient {
             for child in children {
                 queue.push_back((child, Some(accessible.clone()), depth + 1));
             }
+            let (bounds, bounds_space) = match self.node_bounds(&accessible).await {
+                Some((rect, space)) => (Some(rect), space),
+                None => (None, BoundsSpace::default()),
+            };
             result.push(NodeSnapshot {
                 reference: String::new(),
-                bounds: self.bounds(&accessible).await,
+                bounds,
+                bounds_space,
                 accessible,
                 parent,
                 name,
@@ -394,14 +426,40 @@ pub fn root_json(reference: &str, root: &RootSnapshot, z_order: usize) -> Value 
 pub fn outline_json(root: &RootSnapshot, nodes: &[NodeSnapshot], max_nodes: usize) -> Value {
     let mut descendants: HashMap<AccessibleRef, Vec<Value>> = HashMap::new();
     let mut roots = Vec::new();
+    let frame_origin = root
+        .frame
+        .as_ref()
+        .map(|frame| (frame.x, frame.y))
+        .unwrap_or((0, 0));
+    // Chromium answers extents in screen coordinates; some GTK stacks answer
+    // in window coordinates (or report positions as 0, 0). Calibrate from the
+    // root node's own extents so every rect handed to the model is
+    // window-relative, matching the captured image.
+    let tree_window_relative = nodes
+        .iter()
+        .find(|node| node.accessible == root.accessible)
+        .or_else(|| nodes.first())
+        .and_then(|node| node.bounds.as_ref())
+        .map(|bounds| {
+            let root_near_zero = bounds.x.abs() <= 2 && bounds.y.abs() <= 2;
+            let frame_far = frame_origin.0.abs() > 2 || frame_origin.1.abs() > 2;
+            root_near_zero && frame_far
+        })
+        .unwrap_or(false);
     for node in nodes.iter().rev() {
         let rect = node
             .bounds
             .as_ref()
             .map(|r| {
-                let origin_x = root.frame.as_ref().map(|f| f.x).unwrap_or(0);
-                let origin_y = root.frame.as_ref().map(|f| f.y).unwrap_or(0);
-                json!({"x":relative_coordinate(r.x, origin_x),"y":relative_coordinate(r.y, origin_y),"w":r.width,"h":r.height})
+                let (x, y) = match node.bounds_space {
+                    BoundsSpace::Window => (r.x, r.y),
+                    BoundsSpace::Screen if tree_window_relative => (r.x, r.y),
+                    BoundsSpace::Screen => (
+                        relative_coordinate(r.x, frame_origin.0),
+                        relative_coordinate(r.y, frame_origin.1),
+                    ),
+                };
+                json!({"x":x,"y":y,"w":r.width,"h":r.height})
             })
             .unwrap_or_else(|| json!({"x":0,"y":0,"w":0,"h":0}));
         let can_press = node.interfaces.contains(ACTION);
@@ -566,6 +624,153 @@ mod tests {
         assert_eq!(relative_coordinate(i32::MIN, i32::MAX), i32::MIN);
         assert_eq!(relative_coordinate(i32::MAX, i32::MIN), i32::MAX);
         assert_eq!(relative_coordinate(355, 100), 255);
+    }
+
+    #[test]
+    fn outline_rects_are_window_relative_across_coordinate_spaces() {
+        let frame = Rect {
+            x: 600,
+            y: 320,
+            width: 500,
+            height: 400,
+        };
+        let root_snapshot = |frame: Option<Rect>| RootSnapshot {
+            accessible: AccessibleRef {
+                destination: ":1.2".into(),
+                path: "/e1".into(),
+            },
+            pid: 42,
+            name: "Window".into(),
+            app_name: "App".into(),
+            role: "frame".into(),
+            frame,
+            x11_window: Some(1),
+            is_focused: true,
+            is_minimized: false,
+            z_order: Some(0),
+        };
+        let test_node = |reference: &str, bounds: Rect, space: BoundsSpace, child: bool| {
+            let mut node = NodeSnapshot::minimal(AccessibleRef {
+                destination: ":1.2".into(),
+                path: format!("/{}", reference.trim_start_matches('@')),
+            });
+            node.reference = reference.into();
+            node.bounds = Some(bounds);
+            node.bounds_space = space;
+            if child {
+                node.parent = Some(AccessibleRef {
+                    destination: ":1.2".into(),
+                    path: "/e1".into(),
+                });
+                node.depth = 1;
+            }
+            node
+        };
+
+        // Screen-space extents (Chromium): the frame origin is subtracted.
+        let value = outline_json(
+            &root_snapshot(Some(frame.clone())),
+            &[
+                test_node(
+                    "@e1",
+                    Rect {
+                        x: 600,
+                        y: 320,
+                        width: 500,
+                        height: 400,
+                    },
+                    BoundsSpace::Screen,
+                    false,
+                ),
+                test_node(
+                    "@e2",
+                    Rect {
+                        x: 620,
+                        y: 350,
+                        width: 60,
+                        height: 30,
+                    },
+                    BoundsSpace::Screen,
+                    true,
+                ),
+            ],
+            10,
+        );
+        assert_eq!(value["rect"], json!({"x":0,"y":0,"w":500,"h":400}));
+        assert_eq!(
+            value["children"][0]["rect"],
+            json!({"x":20,"y":30,"w":60,"h":30})
+        );
+
+        // Window-space extents (some GTK stacks): passed through untouched.
+        let value = outline_json(
+            &root_snapshot(Some(frame.clone())),
+            &[
+                test_node(
+                    "@e1",
+                    Rect {
+                        x: 0,
+                        y: 0,
+                        width: 500,
+                        height: 400,
+                    },
+                    BoundsSpace::Screen,
+                    false,
+                ),
+                test_node(
+                    "@e2",
+                    Rect {
+                        x: 40,
+                        y: 120,
+                        width: 200,
+                        height: 30,
+                    },
+                    BoundsSpace::Screen,
+                    true,
+                ),
+            ],
+            10,
+        );
+        assert_eq!(value["rect"], json!({"x":0,"y":0,"w":500,"h":400}));
+        assert_eq!(
+            value["children"][0]["rect"],
+            json!({"x":40,"y":120,"w":200,"h":30})
+        );
+
+        // Per-node window coordinates (the GetExtents(1) recovery) are trusted
+        // even when the rest of the tree looks screen-relative.
+        let value = outline_json(
+            &root_snapshot(Some(frame)),
+            &[
+                test_node(
+                    "@e1",
+                    Rect {
+                        x: 600,
+                        y: 320,
+                        width: 500,
+                        height: 400,
+                    },
+                    BoundsSpace::Screen,
+                    false,
+                ),
+                test_node(
+                    "@e2",
+                    Rect {
+                        x: 12,
+                        y: 34,
+                        width: 60,
+                        height: 30,
+                    },
+                    BoundsSpace::Window,
+                    true,
+                ),
+            ],
+            10,
+        );
+        assert_eq!(
+            value["children"][0]["rect"],
+            json!({"x":12,"y":34,"w":60,"h":30})
+        );
     }
 
     struct MockBus;

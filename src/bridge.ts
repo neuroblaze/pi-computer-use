@@ -1077,6 +1077,7 @@ async function buildToolResult(
 	imageMode: ImageMode = operationState().currentImageMode ?? "auto",
 	base?: { stateId: string; outline: Outline },
 	detail: ObserveDetail = "compact",
+	hitReport?: string,
 ): Promise<AgentToolResult<ComputerUseDetails>> {
 	const state = operationState();
 	const fallbackReason = imageFallbackReason(tool, result, imageMode);
@@ -1153,7 +1154,8 @@ async function buildToolResult(
 		? "\n\nThis model cannot receive images: a vision-capable model is strongly recommended for computer use. If this task needs visual feedback, ask your user to switch models."
 		: "";
 	const deltaText = rootDeltaLines(execution).join("\n");
-	const content: AgentToolResult<ComputerUseDetails>["content"] = [{ type: "text", text: `${summary}${deltaText ? `\n${deltaText}` : ""}${consoleText}${noteText}${outlineText}${fallbackText}${advisoryText}` }];
+	const hitReportText = hitReport ? `\n${hitReport}` : "";
+	const content: AgentToolResult<ComputerUseDetails>["content"] = [{ type: "text", text: `${summary}${deltaText ? `\n${deltaText}` : ""}${hitReportText}${consoleText}${noteText}${outlineText}${fallbackText}${advisoryText}` }];
 	if (fallbackReason && result.look.image?.jpegBase64 && imagesAllowed()) {
 		const annotated = snapshot ? await tryRenderOverview(captureSourceFromLook(result.look), snapshot) : undefined;
 		if (annotated) content.push({ type: "image", data: annotated.toString("base64"), mimeType: "image/png" });
@@ -1436,7 +1438,7 @@ async function withBrowserWrite<T>(contextId: string, work: () => Promise<T>): P
 	return result.value;
 }
 
-async function browserObservationResult(browser: CdpPageSnapshot, resourceKey: string, epoch: number, tool: string, base?: { stateId: string; outline: SerializedOutline }, detail: ObserveDetail = "compact"): Promise<AgentToolResult<BrowserObservationDetails>> {
+async function browserObservationResult(browser: CdpPageSnapshot, resourceKey: string, epoch: number, tool: string, base?: { stateId: string; outline: SerializedOutline }, detail: ObserveDetail = "compact", hitReport?: string): Promise<AgentToolResult<BrowserObservationDetails>> {
 	savedStates.set({ stateId: browser.snapshotId, resourceKey, epoch, value: { kind: "browser", snapshot: browser, outline: browser.outline } });
 	const currentOutline = restoreOutline(browser.outline);
 	const transition = base ? changesBetween(restoreOutline(base.outline), currentOutline) : undefined;
@@ -1459,7 +1461,7 @@ async function browserObservationResult(browser: CdpPageSnapshot, resourceKey: s
 		? "\n\nThis model cannot receive images: a vision-capable model is strongly recommended for computer use. If this task needs visual feedback, ask your user to switch models."
 		: "";
 	const content: AgentToolResult<BrowserObservationDetails>["content"] = [
-		{ type: "text", text: `${tool} completed for ${root.ref} ${JSON.stringify(browser.title)}. State ${browser.snapshotId}.\n${viewText}${advisoryText}` },
+		{ type: "text", text: `${tool} completed for ${root.ref} ${JSON.stringify(browser.title)}. State ${browser.snapshotId}.\n${hitReport ? `${hitReport}\n` : ""}${viewText}${advisoryText}` },
 	];
 	if (browser.image && snapshot && imagesAllowed()) {
 		const annotated = await tryRenderOverview(browserCaptureSource(browser), snapshot);
@@ -1810,6 +1812,85 @@ function rectsIntersect(a: RectLike, region: { x: number; y: number; w: number; 
 
 function formatElementLine(element: VisualElement): string {
 	return `${element.ref} ${element.role}${element.name ? ` "${element.name}"` : ""}`;
+}
+
+interface CoordinateActionReport {
+	label: string;
+	start: { x: number; y: number };
+	end: { x: number; y: number };
+}
+
+/** Coordinate actions worth a hit report: clicks without a ref, moves, and drags. */
+function coordinateActionReport(action: UiAction): CoordinateActionReport | undefined {
+	const point = (x: unknown, y: unknown) => Number.isFinite(x) && Number.isFinite(y) ? { x: Number(x), y: Number(y) } : undefined;
+	if ((action.action === "click" || action.action === "moveMouse") && !trimOrUndefined(action.ref)) {
+		const start = point(action.x, action.y);
+		if (!start) return undefined;
+		return { label: `${action.action} (${Math.round(start.x)},${Math.round(start.y)})`, start, end: start };
+	}
+	if (action.action === "drag" && action.path?.length) {
+		const path = normalizeActionPath(action.path);
+		const start = path[0];
+		const end = path[path.length - 1];
+		return { label: `drag (${Math.round(start.x)},${Math.round(start.y)})→(${Math.round(end.x)},${Math.round(end.y)})`, start, end };
+	}
+	return undefined;
+}
+
+/** Converts a capture-pixel point between two captures of the same screen space. */
+function capturePointBetween(point: { x: number; y: number }, from: CaptureSource, to: CaptureSource): { x: number; y: number } {
+	const screenX = from.screenOrigin[0] + (point.x * from.size[0]) / Math.max(1, from.image.width);
+	const screenY = from.screenOrigin[1] + (point.y * from.size[1]) / Math.max(1, from.image.height);
+	return {
+		x: (screenX - to.screenOrigin[0]) * (to.image.width / Math.max(1, to.size[0])),
+		y: (screenY - to.screenOrigin[1]) * (to.image.height / Math.max(1, to.size[1])),
+	};
+}
+
+function hitTargetText(element: VisualElement | undefined): string {
+	return element ? formatElementLine(element) : "no element";
+}
+
+function hitReportLines(
+	beforeSnapshot: VisualSnapshot,
+	afterSnapshot: VisualSnapshot,
+	actions: UiAction[],
+	convert: (point: { x: number; y: number }) => { x: number; y: number },
+): string[] {
+	const lines: string[] = [];
+	for (const action of actions) {
+		if (lines.length >= 3) break;
+		const report = coordinateActionReport(action);
+		if (!report) continue;
+		const before = elementAt(beforeSnapshot, report.start.x, report.start.y)[0];
+		const endPoint = convert(report.end);
+		const after = elementAt(afterSnapshot, endPoint.x, endPoint.y)[0];
+		lines.push(`${report.label}: ${hitTargetText(before)} → ${hitTargetText(after)}`);
+	}
+	return lines;
+}
+
+/** Post-action report: what sat under each coordinate action before and after dispatch. */
+function desktopHitReport(
+	beforeLook: LookResponse,
+	afterLook: LookResponse,
+	actions: UiAction[],
+): string | undefined {
+	const beforeSource = captureSourceFromLook(beforeLook);
+	const afterSource = captureSourceFromLook(afterLook);
+	if (!beforeSource || !afterSource) return undefined;
+	const beforeSnapshot = buildVisualSnapshot(beforeLook, {});
+	const afterSnapshot = buildVisualSnapshot(afterLook, {});
+	const lines = hitReportLines(beforeSnapshot, afterSnapshot, actions, (point) => capturePointBetween(point, beforeSource, afterSource));
+	return lines.length > 0 ? `Hit report: ${lines.join("; ")}.` : undefined;
+}
+
+/** Post-action report for browser pages; viewport pixels are shared between snapshots. */
+function browserHitReport(before: CdpPageSnapshot, after: CdpPageSnapshot, actions: UiAction[]): string | undefined {
+	const beforeSnapshot = buildBrowserSnapshot(before);
+	const afterSnapshot = buildBrowserSnapshot(after);
+	const lines = hitReportLines(beforeSnapshot, afterSnapshot, actions, (point) => point);
+	return lines.length > 0 ? `Hit report: ${lines.join("; ")}.` : undefined;
 }
 
 async function ensureBrowserImage(browser: CdpPageSnapshot): Promise<boolean> {
@@ -2221,7 +2302,11 @@ async function performDesktopTransaction(params: ActParams, actions: UiAction[],
 			for (const action of executedActions) {
 				state.currentNote = noteAfterAct(state.currentNote ?? noteBefore, action.ref, capture.outline, { window: noteWindowForTarget(capture.target, capture.look), rootDelta: execution.rootDelta });
 			}
-			return await buildToolResult("act_ui", `Executed ${executedActions.length} checked UI action${executedActions.length === 1 ? "" : "s"} in ${target.appName} — ${target.windowTitle}. Returned state ${capture.capture.stateId}.`, capture, execution, signal, state.currentImageMode, baseView);
+			const hitReport = desktopHitReport(look, capture.look, executedActions);
+			const hitText = hitReport && getComputerUseConfig().headless && execution.outcome !== "worked"
+				? `${hitReport} Coordinate actions were not delivered: headless mode batches with ax_only delivery, which forbids XTEST (set headless=false for pixel clicks).`
+				: hitReport;
+			return await buildToolResult("act_ui", `Executed ${executedActions.length} checked UI action${executedActions.length === 1 ? "" : "s"} in ${target.appName} — ${target.windowTitle}. Returned state ${capture.capture.stateId}.`, capture, execution, signal, state.currentImageMode, baseView, "compact", hitText);
 		} catch (error) {
 			if (signal?.aborted) {
 				clearDesktopOperationState(state);
@@ -2281,7 +2366,12 @@ async function performBrowserTransaction(params: ActParams, actions: UiAction[],
 			} while (!satisfied && Date.now() < deadline);
 			if (!satisfied) throw new Error(`The browser action was delivered but its postcondition was not satisfied within ${condition.timeoutMs}ms.`);
 		}
-		return await refreshBrowserSnapshot(contextId, "act_ui", baseView);
+		const refreshed = await cdpSnapshotForContext(contextId);
+		if (!refreshed) throw new Error(`Browser root '${contextId}' is no longer available. Observe it again.`);
+		const hitReport = browserHitReport(baseSnapshot, refreshed, actions);
+		const state = operationState();
+		const resourceKey = state.resourceKey ?? `cdp:${baseSnapshot.targetId}`;
+		return await browserObservationResult(refreshed, resourceKey, state.epoch ?? resourceScheduler.epoch(resourceKey), "act_ui", baseView, "compact", hitReport);
 	});
 }
 

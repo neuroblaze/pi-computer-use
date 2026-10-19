@@ -15,5 +15,4 @@ spike-out/
 native/linux/bridge-rs/target/
 
 # Built helper binaries (produced by scripts/build-native.mjs)
-prebuilt/linux/
 __pycache__/
